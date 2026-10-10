@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 
 namespace matrixLib
@@ -17,7 +18,7 @@ namespace matrixLib
 	namespace
 	{
 		// bump when the voice model changes: the snapshot holds calibration done against it
-		constexpr uint8_t SnapshotVersion = 4;
+		constexpr uint8_t SnapshotVersion = 8;
 		constexpr char SnapshotMagic[] = "M1KSRAM";
 		constexpr char SnapshotFile[] = "matrix1000.nvram";
 
@@ -26,6 +27,12 @@ namespace matrixLib
 		// the firmware keeps up with four times the MIDI rate, which keeps controller and
 		// pitch bend streams from queueing up behind the 31.25 kbaud UART
 		constexpr uint32_t UartCyclesPerByte = Hardware::MidiCyclesPerByte / 4;
+
+		// spacing of remote edits, and how long after a patch load the first may follow
+		constexpr float EditSeconds = 0.025f;
+		constexpr float RebuildSeconds = 1.0f;      // without an edit before the precautionary rebuild
+		constexpr float BusSeconds = 0.16f;         // after a matrix bus message before anything else is sent
+		constexpr float PatchLoadSeconds = 0.15f;
 
 		// continuous messages that only need their latest value per block
 		uint32_t coalesceKey(const synthLib::SMidiEvent& _ev)
@@ -53,7 +60,7 @@ namespace matrixLib
 			return s;
 		}
 
-		// LFO rate per speed value: the firmware's increment table at $AA1C times the tick scale
+		// LFO rate per speed value, from the firmware's increment table at $AA1C
 		constexpr uint16_t LfoIncrements[64] =
 		{
 			44, 62, 74, 88, 102, 116, 132, 148, 168, 172, 192, 214, 242, 276, 312, 356,
@@ -61,7 +68,20 @@ namespace matrixLib
 			1424, 1490, 1560, 1638, 1724, 1820, 1928, 2048, 2184, 2340, 2520, 2730, 2978, 3276, 3450, 3640,
 			3856, 4096, 4370, 4682, 5042, 5462, 5958, 6554, 7282, 8192, 9364, 10924, 13108, 16386, 21846, 32770
 		};
-		constexpr double LfoHzPerIncrement = 5.9466e-4;
+		// The firmware adds the increment to the phase on every other pass of its voice update,
+		// and starts the cycle again when the sum passes 65536, dropping what is over. A cycle
+		// is therefore a whole number of those steps, 65536 / increment rounded up: the rates
+		// it can play are the step rate divided by 2, 3, 4 and so on, and two speed values
+		// can share one. Measured on the firmware for every speed from 16 to 62. A pass takes
+		// a little longer the more voices sound, 37.55 steps a second with one and 37.15 with
+		// six: the figure here is the middle.
+		constexpr double LfoStepsPerSecond = 37.35;
+
+		constexpr double lfoHz(const int _speed)
+		{
+			const uint32_t inc = LfoIncrements[_speed];
+			return LfoStepsPerSecond / static_cast<double>((65536u + inc - 1) / inc);
+		}
 
 		struct LfoDivision { const char* name; double beats; };
 		constexpr LfoDivision LfoDivisions[] =
@@ -77,6 +97,9 @@ namespace matrixLib
 		constexpr uint32_t LfoDivisionCount = sizeof(LfoDivisions) / sizeof(LfoDivisions[0]);
 		constexpr double LfoSyncTolerance = 0.06;
 		constexpr uint8_t LfoSpeedParam[2] = {80, 90};
+		constexpr uint8_t PortaRateParam = 44;
+		constexpr uint8_t Dco1PortaParam = 8;       // 1 = DCO 1 glides
+		constexpr uint8_t Dco2KeyboardParam = 18;   // 1 = DCO 2 follows the keyboard with portamento
 
 		// without a host playhead, MIDI clock or SysEx tempo (the standalone app)
 		constexpr float DefaultBpm = 120.0f;
@@ -88,7 +111,7 @@ namespace matrixLib
 			double bestErr = 1e9;
 			for(int i = 0; i < 64; ++i)
 			{
-				const double hz = LfoIncrements[i] * LfoHzPerIncrement;
+				const double hz = lfoHz(i);
 				const double err = std::fabs(std::log(hz / _hz));
 				if(err < bestErr)
 				{
@@ -114,7 +137,11 @@ namespace matrixLib
 			const auto tmp = _path + ".tmp" + std::to_string(id);
 			if(!baseLib::filesystem::writeFile(tmp, _data))
 				return false;
-			if(std::rename(tmp.c_str(), _path.c_str()) == 0)
+			// std::rename refuses to replace an existing file on Windows, which left the first
+			// snapshot in place for good; the filesystem call replaces it on every platform
+			std::error_code ec;
+			std::filesystem::rename(tmp, _path, ec);
+			if(!ec)
 				return true;
 			std::remove(tmp.c_str());
 			return false;
@@ -235,6 +262,7 @@ namespace matrixLib
 		if(warm)
 		{
 			runSeconds(1.0f);
+			selectFirstProgram();
 			return;
 		}
 
@@ -254,7 +282,63 @@ namespace matrixLib
 		}
 		runSeconds(1.0f);
 
+		primeVoices();
 		saveSnapshot();
+		selectFirstProgram();
+	}
+
+	// Remote edits (opcodes 06 and 0B) are written where a pointer in the firmware's RAM
+	// says. After power-up it does not point at the patch that plays, so the edits are
+	// stored and never heard. A program change sets it and a patch sent to the edit buffer
+	// leaves it alone: one program change after every boot is enough.
+	void Device::selectFirstProgram()
+	{
+		auto& hw = m_machine.getHardware();
+		hw.midiIn(0xc0);
+		hw.midiIn(0x00);
+		runSeconds(0.3f);
+	}
+
+	// The firmware only keeps the modulation sources up to date that the loaded patch uses.
+	// After a cold start the words behind the others still hold power-up noise, and a patch
+	// that reads one nobody computes gets that noise, flag byte included: three factory
+	// patches feed the tracking generator from itself, and on some voices the stray flag
+	// bits shut their filter. One note per voice with the tracking generator in use leaves
+	// every voice with a valid value, as an instrument that has been played has.
+	void Device::primeVoices()
+	{
+		patch::Data d{};
+		patch::setName(d, "INIT");
+		d[patch::findParam(48)->byte] = 1;                            // keyboard mode Rotate: six notes, six voices
+		d[patch::findParam(33)->byte] = patch::SourceKeyboard;        // Track Input
+		constexpr uint8_t points[5] = {0, 15, 31, 47, 63};
+		for(uint8_t i = 0; i < 5; ++i)
+			d[patch::findParam(static_cast<uint8_t>(34 + i))->byte] = points[i];
+		// routed somewhere so that the generator runs
+		d[patch::MatrixOffset] = patch::SourceTracking;
+		d[patch::MatrixOffset + 1] = 1;
+		d[patch::MatrixOffset + 2] = patch::DestVcfFrequency;
+
+		auto& hw = m_machine.getHardware();
+		for(const auto b : patch::encode(d, patch::OpEditBuffer, 0))
+			hw.midiIn(b);
+		runSeconds(0.3f);
+
+		constexpr uint8_t firstNote = 57;
+		for(uint8_t i = 0; i < Hardware::VoiceCount; ++i)
+		{
+			hw.midiIn(0x90);
+			hw.midiIn(static_cast<uint8_t>(firstNote + i));
+			hw.midiIn(64);
+		}
+		runSeconds(0.3f);
+		for(uint8_t i = 0; i < Hardware::VoiceCount; ++i)
+		{
+			hw.midiIn(0x80);
+			hw.midiIn(static_cast<uint8_t>(firstNote + i));
+			hw.midiIn(0);
+		}
+		runSeconds(0.5f);
 	}
 
 	std::string Device::romBankFileName(const uint32_t _bank)
@@ -385,7 +469,6 @@ namespace matrixLib
 	{
 		const float bpm = getHostBpm();
 		m_sentBpm = bpm;
-		auto& hw = m_machine.getHardware();
 
 		for(uint32_t lfo = 0; lfo < 2; ++lfo)
 		{
@@ -394,8 +477,7 @@ namespace matrixLib
 			{
 				// give the patch its own speed back
 				if(m_sentSpeed[lfo] >= 0 && m_patchLfoSpeed[lfo] >= 0)
-					for(const auto b : patch::createParamChange(LfoSpeedParam[lfo], m_patchLfoSpeed[lfo]))
-						hw.midiIn(b);
+					queueEdit(patch::createParamChange(LfoSpeedParam[lfo], m_patchLfoSpeed[lfo]));
 				m_sentSpeed[lfo] = -1;
 				continue;
 			}
@@ -404,9 +486,110 @@ namespace matrixLib
 			if(!_force && speed == m_sentSpeed[lfo])
 				continue;
 			m_sentSpeed[lfo] = speed;
-			for(const auto b : patch::createParamChange(LfoSpeedParam[lfo], speed))
-				hw.midiIn(b);
+			queueEdit(patch::createParamChange(LfoSpeedParam[lfo], speed));
 		}
+	}
+
+	void Device::queueEdit(const std::vector<uint8_t>& _sysex)
+	{
+		if(_sysex[3] == patch::OpMatrixParameter && _sysex.size() >= 9 && _sysex[4] == patch::MatrixBusCount - 1)
+		{
+			m_lastBus[0] = _sysex[5];
+			m_lastBus[1] = static_cast<uint8_t>(static_cast<int8_t>(_sysex[6] << 1) >> 1);   // 7 bit two's complement
+			m_lastBus[2] = _sysex[7];
+		}
+
+		// same opcode and same parameter or bus
+		for(auto& waiting : m_editQueue)
+		{
+			if(waiting[3] == _sysex[3] && waiting[4] == _sysex[4])
+			{
+				waiting = _sysex;
+				return;
+			}
+		}
+		m_editQueue.push_back(_sysex);
+	}
+
+	void Device::feedEdits(const size_t _samples)
+	{
+		if(m_editHold > _samples)
+		{
+			m_editHold -= static_cast<uint32_t>(_samples);
+			return;
+		}
+		m_editHold = 0;
+
+		auto& hw = m_machine.getHardware();
+		if(hw.midiInPending())
+			return;
+
+		if(m_editQueue.empty())
+		{
+			// the edits have stopped for a while: bring the modulation program up to date
+			if(!m_rebuildPending)
+				return;
+			if(m_rebuildWait > _samples)
+			{
+				m_rebuildWait -= static_cast<uint32_t>(_samples);
+				return;
+			}
+			m_editQueue.push_back(rebuildMessage());
+		}
+
+		const auto message = m_editQueue.front();
+		m_editQueue.erase(m_editQueue.begin());
+		for(const auto b : message)
+			hw.midiIn(b);
+		m_editHold = static_cast<uint32_t>(m_machine.getSamplerate() * EditSeconds);
+
+		if(message[3] == patch::OpMatrixParameter)
+		{
+			// Any bus edit rebuilds. The firmware brings the notes that are sounding up to
+			// date about a tenth of a second later, and a second bus message inside that time
+			// calls it off for good: the held note then never hears either. So the next
+			// message waits until the firmware is through.
+			m_rebuildPending = false;
+			m_editHold = static_cast<uint32_t>(m_machine.getSamplerate() * BusSeconds);
+			// the notes that sound take the new amount in one leap then: on the filter and the
+			// pulse widths it is drawn out until the next message can go
+			const float rate = m_machine.getSamplerate();
+			hw.expectEdit(static_cast<uint32_t>(rate * 0.03f), static_cast<uint32_t>(rate * 0.25f), static_cast<uint32_t>(rate * BusSeconds));
+			return;
+		}
+
+		// A selector changes what the modulation program has to contain, and so does an amount
+		// that leaves zero: until the rebuild it is plainly wrong, a vibrato depth that only
+		// detunes. An amount that is already at work follows the edit as it is, like the plain
+		// levels and times. Those get a rebuild all the same, as a precaution, but only when
+		// the edits have stopped: for a tenth of a second after a rebuild the firmware keeps
+		// parameter edits from the notes that are sounding, so one behind every step of a knob
+		// would leave a held note deaf to the knob until it rests.
+		m_rebuildPending = true;
+		m_rebuildWait = static_cast<uint32_t>(m_machine.getSamplerate() * RebuildSeconds);
+		const auto* p = patch::findParam(message[4]);
+		bool programEdit = false;
+		if(p)
+		{
+			const auto value = static_cast<int8_t>(static_cast<int8_t>(message[5] << 1) >> 1);   // 7 bit two's complement
+			const int before = m_paramsKnown ? m_paramValue[p->number & 0x7f] : 0;
+			// (the detune is bipolar too, but it is a level like the others; the amount of
+			// envelope 2 on VCA 2 has no sign but is an amount)
+			const bool amount = p->number != 12 && (p->min < 0 || p->number == 29);
+			if(amount)
+				programEdit = value != 0 && (before == 0 || (before < 0) != (value < 0));
+			else
+				programEdit = p->max <= 20;
+			m_paramValue[p->number & 0x7f] = value;
+		}
+		const bool busEditNext = !m_editQueue.empty() && m_editQueue.front()[3] == patch::OpMatrixParameter;
+		if(programEdit && !busEditNext)
+			m_editQueue.insert(m_editQueue.begin(), rebuildMessage());
+	}
+
+	std::vector<uint8_t> Device::rebuildMessage() const
+	{
+		return patch::createMatrixChange(static_cast<uint8_t>(patch::MatrixBusCount - 1), m_lastBus[0], static_cast<int8_t>(m_lastBus[1]), m_lastBus[2]);
 	}
 
 	bool Device::sendMidi(const synthLib::SMidiEvent& _ev, std::vector<synthLib::SMidiEvent>&)
@@ -451,17 +634,64 @@ namespace matrixLib
 
 		if(!_ev.sysex.empty())
 		{
-			for(const auto b : _ev.sysex)
-				hw.midiIn(b);
+			const bool matrix = _ev.sysex.size() > 5 && _ev.sysex[1] == patch::IdOberheim && _ev.sysex[2] == patch::IdMatrix;
+
+			// With the keyboard in unison the firmware leaves two of its six voices behind
+			// when the portamento rate is 0: they crawl after each note at the slowest rate
+			// and the patch plays out of tune. Rate 1 arrives within one pitch update, so
+			// that is what the firmware gets; the patch and the editor keep their 0.
+			std::vector<uint8_t> replaced;
+			if(matrix && _ev.sysex[3] == patch::OpParameter && _ev.sysex.size() >= 7 && _ev.sysex[4] == PortaRateParam && (_ev.sysex[5] & 0x7f) == 0)
+			{
+				replaced = patch::createParamChange(PortaRateParam, 1);
+			}
+			else if(matrix && (_ev.sysex[3] == patch::OpEditBuffer || _ev.sysex[3] == patch::OpSinglePatch))
+			{
+				if(auto data = patch::decode(_ev.sysex))
+				{
+					auto& rate = (*data)[patch::findParam(PortaRateParam)->byte];
+					if(rate == 0)
+					{
+						rate = 1;
+						replaced = patch::encode(*data, _ev.sysex[3], _ev.sysex[4]);
+					}
+				}
+			}
+			const auto& sx = replaced.empty() ? _ev.sysex : replaced;
+
+			if(matrix && (sx[3] == patch::OpParameter || sx[3] == patch::OpMatrixParameter))
+			{
+				queueEdit(sx);
+			}
+			else
+			{
+				for(const auto b : sx)
+					hw.midiIn(b);
+				if(matrix && (sx[3] == patch::OpEditBuffer || sx[3] == patch::OpSinglePatch))
+				{
+					// edits still waiting were meant for the patch this one replaces
+					m_editQueue.clear();
+					m_editHold = static_cast<uint32_t>(m_machine.getSamplerate() * PatchLoadSeconds);
+				}
+			}
 			// a new patch or an edit of the speed itself replaces the synced value
-			const auto& sx = _ev.sysex;
-			if(sx.size() > 5 && sx[1] == patch::IdOberheim && sx[2] == patch::IdMatrix)
+			if(matrix)
 			{
 				if(sx[3] == patch::OpEditBuffer)
 				{
+					m_paramsKnown = false;
 					if(const auto data = patch::decode(sx))
+					{
+						for(uint8_t n = 0; n < m_paramValue.size(); ++n)
+							if(const auto* p = patch::findParam(n))
+								m_paramValue[n] = static_cast<int8_t>((*data)[p->byte]);
+						m_paramsKnown = true;
 						for(uint32_t lfo = 0; lfo < 2; ++lfo)
 							m_patchLfoSpeed[lfo] = (*data)[patch::findParam(LfoSpeedParam[lfo])->byte];
+						const auto* bus = data->data() + patch::MatrixOffset + (patch::MatrixBusCount - 1) * 3;
+						std::copy(bus, bus + 3, m_lastBus);
+					}
+					m_rebuildPending = false;
 					m_lfoSyncDirty.store(true);
 				}
 				else if(sx[3] == patch::OpSinglePatch)
@@ -483,11 +713,16 @@ namespace matrixLib
 		if(status >= 0xf8)
 			return;
 
+		// A program change would make the firmware load a patch from its own memory, which is
+		// not the bank the plugin plays from: the sound would change behind the panel. The
+		// plugin picks programs itself and sends the patch, so none is passed on.
 		if((status & 0xf0) == 0xc0)
-		{
-			m_patchLfoSpeed[0] = m_patchLfoSpeed[1] = -1;
-			m_lfoSyncDirty.store(true);
-		}
+			return;
+
+		// The pitch the firmware writes next for a resting voice is this note, see Machine.
+		// Not for an oscillator with portamento: its first step is the start of a glide.
+		if((status & 0xf0) == 0x90 && (_ev.c & 0x7f) && m_paramsKnown)
+			m_machine.expectNote(m_paramValue[Dco1PortaParam] == 0, m_paramValue[Dco2KeyboardParam] != 1);
 
 		hw.midiIn(status);
 		switch(status & 0xf0)
@@ -516,6 +751,8 @@ namespace matrixLib
 	{
 		if(m_mono.size() < _samples)
 			m_mono.resize(_samples);
+
+		feedEdits(_samples);
 
 		std::stable_sort(m_pending.begin(), m_pending.end(), [](const PendingEvent& _a, const PendingEvent& _b) { return _a.offset < _b.offset; });
 

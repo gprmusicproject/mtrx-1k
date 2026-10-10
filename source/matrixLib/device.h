@@ -4,6 +4,7 @@
 
 #include "matrixMachine.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -60,6 +61,8 @@ namespace matrixLib
 
 	private:
 		void boot();
+		void primeVoices();
+		void selectFirstProgram();
 		bool loadSnapshot();
 		void saveSnapshot() const;
 		void runSeconds(float _seconds);
@@ -70,6 +73,19 @@ namespace matrixLib
 
 		void pushMidi(const synthLib::SMidiEvent& _ev);
 		void sendLfoSync(bool _force);
+
+		// Remote edits (opcodes 06 and 0B) wait here. The firmware takes 10 to 20 ms for
+		// each and loses what arrives meanwhile, so they go out one at a time, and a newer
+		// value of a parameter replaces the one still waiting.
+		void queueEdit(const std::vector<uint8_t>& _sysex);
+		void feedEdits(size_t _samples);
+
+		// A parameter edit (06) changes the value but not the firmware's modulation program,
+		// which is only built when a patch is loaded or a matrix bus is edited. A modulation
+		// that was at zero then stays a fixed offset, and a selector that brings another
+		// source into play does nothing. Sending the last bus again unchanged makes the
+		// firmware rebuild: at once after edits of that kind, otherwise when the edits pause.
+		std::vector<uint8_t> rebuildMessage() const;
 		void parseMidiOut(uint8_t _byte);
 
 		Machine m_machine;
@@ -84,6 +100,16 @@ namespace matrixLib
 		};
 		std::vector<PendingEvent> m_pending;
 		std::vector<float> m_mono;
+
+		std::vector<std::vector<uint8_t>> m_editQueue;
+		uint32_t m_editHold = 0;   // samples until the next edit may go out
+		uint8_t m_lastBus[3] = {0, 0, 0};   // source, amount and destination of bus 10 as the firmware has it
+		bool m_rebuildPending = false;
+		uint32_t m_rebuildWait = 0;   // samples without an edit until the pending rebuild goes out
+		// the value of every patch parameter as the firmware has it, unknown after a program
+		// change it answers from its own memory
+		std::array<int8_t, 128> m_paramValue{};
+		bool m_paramsKnown = false;
 
 		std::vector<uint8_t> m_txBytes;
 		std::vector<uint8_t> m_txSysex;

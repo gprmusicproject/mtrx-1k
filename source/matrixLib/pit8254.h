@@ -46,6 +46,10 @@ namespace matrixLib
 		// period in ticks of a counter running in mode 2 or 3, 0 if stopped
 		uint32_t getPeriod(uint32_t _counter, uint64_t _tick);
 
+		// The period the counter will run at once a count that is waiting for the end of the
+		// current period has loaded: the last one written.
+		uint32_t getWrittenPeriod(uint32_t _counter, uint64_t _tick);
+
 		// tick of the next OUT transition after _tick, or ~0 if none is scheduled
 		uint64_t nextOutEdge(uint32_t _counter, uint64_t _tick);
 

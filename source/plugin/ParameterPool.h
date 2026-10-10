@@ -145,6 +145,34 @@ namespace retromulator
 
         static const char* coreFileName(SynthType type);
 
+        // Slot bound to a core-specific parameter index, or null.
+        SlotParameter* findNativeSlot(int native) const;
+
+        // ── Matrix-1000 patch editing ───────────────────────────────────────
+        // The ten buses of the modulation matrix. The firmware takes source, amount and
+        // destination of a bus in one message and there are not thirty free slots, so they
+        // live beside the slots: not automatable, but saved, restored and resent with them.
+        struct MatrixBus
+        {
+            uint8_t source = 0;
+            int8_t  amount = 0;
+            uint8_t destination = 0;
+        };
+        static constexpr int MatrixBusCount = 10;
+
+        MatrixBus getMatrixBus(int bus) const;
+        // Sends the bus to the device and keeps it as an edit.
+        void setMatrixBus(int bus, MatrixBus value);
+
+        // True when a patch parameter or a bus was edited since the program was loaded.
+        bool hasPatchEdits() const;
+        // Writes the patch parameter slots and the buses into the 134 bytes of a Matrix patch.
+        void writeMatrixPatch(uint8_t* data) const;
+        // Takes every patch parameter and bus from a Matrix patch as an edit, without sending
+        // them: the caller sends the patch itself, which the firmware takes in one go where a
+        // run of single edits would be dropped.
+        void adoptMatrixPatch(const uint8_t* data);
+
     private:
         struct CoreMap
         {
@@ -188,5 +216,9 @@ namespace retromulator
         std::atomic<uint8_t> m_partChannel{0};
         std::atomic<bool> m_mirroring{false};
         SynthType m_core = SynthType::None;
+
+        // source | amount << 8 | destination << 16 | touched << 24
+        std::array<std::atomic<uint32_t>, MatrixBusCount> m_matrixBuses{};
+        void sendMatrixBus(int bus, MatrixBus value);
     };
 }

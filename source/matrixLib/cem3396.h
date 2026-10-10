@@ -13,7 +13,9 @@ namespace matrixLib
 		{
 			float periodA = 0.0f;     // seconds between discharge pulses, 0 = stopped
 			float periodB = 0.0f;
-			float rtCtA = 0.0f;       // conversion resistance times timing capacitor
+			bool holdA = false;       // no discharge pulses arrive: the timing capacitor charges on
+			bool holdB = false;
+			float rtCtA = 0.0f;      // conversion resistance times timing capacitor
 			float rtCtB = 0.0f;
 			float wsA = 0.0f;         // waveshape (V/I converter) inputs
 			float wsB = 0.0f;
@@ -22,7 +24,10 @@ namespace matrixLib
 			bool slopedA = true;      // wave select, from the quad level driver
 			bool slopedB = false;
 			bool noiseB = false;      // converter B capacitor driven by the noise source
-			uint8_t sync = 0;         // 0 off, 1 soft, 2 medium, 3 hard
+			// Sync of converter A to the timer of B: 0 off, 1 soft, 2 medium, 3 hard. Bit 0: the
+			// falling edge of timer B discharges the capacitor of A (SYNC2 on the voice board).
+			// Bit 1: it restarts the timer of A through its GATE input (SYNC1).
+			uint8_t sync = 0;
 			float balance = 0.0f;
 			float freq = 0.0f;
 			float resonance = 0.0f;
@@ -41,7 +46,10 @@ namespace matrixLib
 		struct Converter
 		{
 			double phase = 0.0;
-			float lastRamp = 0.0f;
+			double offset = 0.0;      // ramp minus timer, in periods: not zero after a sync edge
+			float lastRamp = 0.0f;    // timing capacitor voltage
+			float duty = 0.0f;        // share of the cycle the pulse output is high
+			bool held = false;
 		};
 
 		float filter(float _in, float _cutoff, float _k);
@@ -63,5 +71,6 @@ namespace matrixLib
 		Controls m_smooth;
 		bool m_smoothInit = false;
 		float m_cvCoeff = 0.02f;
+		float m_noiseGain = 1.0f;
 	};
 }

@@ -324,7 +324,7 @@ namespace retromulator
         bool hasEditor() const override { return true; }
         juce::AudioProcessorEditor* createEditor() override;
 
-        const juce::String getName() const override { return "Retromulator"; }
+        const juce::String getName() const override { return "MTRX-1K"; }
 
         // ── Matrix LFO tempo sync ──────────────────────────────────────────
         // Division 0 is off. The device sends the nearest firmware LFO speed after every
@@ -336,6 +336,44 @@ namespace retromulator
         void setMatrixLfoSync(int lfo, int division);
         bool hasMatrixHostTempo() const;
         bool isMatrixLfoDivisionReachable(int division) const;
+
+        // ── Matrix patch editing ───────────────────────────────────────────
+        static constexpr int kMatrixRamSlots  = 200;   // patches 000 to 199 of the instrument
+        static constexpr int kMatrixBankSlots = 100;   // a bank created from the editor
+
+        // The bank file that stands for the instrument's RAM.
+        static std::string getMatrixRamBankPath();
+        // Bank files a patch can be saved into: the RAM bank first, then every other bank
+        // that is not one of the ROM banks.
+        static std::vector<std::string> getMatrixWritableBanks();
+        // Patch names of a bank file, one per position. The RAM bank always has all 200.
+        static std::vector<std::string> getMatrixBankPatchNames(const std::string& bankPath);
+
+        // The patch as it sounds now: the loaded program with every edit applied. 134 bytes.
+        bool getMatrixEditedPatch(uint8_t* data) const;
+        bool hasMatrixPatchEdits() const;
+
+        // Overwrites one position of a bank file with the patch as it sounds, then loads the
+        // bank and selects that position. The RAM bank is copied to Backup/ before its
+        // first change.
+        bool saveMatrixPatch(const std::string& bankPath, int slot, const std::string& name);
+        // Creates a bank file next to the others with the patch as it sounds in its first
+        // position, and loads it. Returns nothing when it worked, otherwise what went wrong.
+        std::string createMatrixBank(const std::string& bankName, const std::string& patchName);
+        // Replaces the sound with the initialised patch. It is an edit of the loaded program
+        // until it is saved.
+        bool initMatrixPatch();
+        // The sound is the initialised patch, not the program that is loaded.
+        bool isMatrixInitPatch() const { return m_matrixInitPatch && hasMatrixPatchEdits(); }
+        // Message thread. The bank file can change behind the plugin: another instance saves
+        // into it, or it is put back from Backup/ while a session still holds its old
+        // content. When it has, the bank is taken from the file again. The sound that plays
+        // is left as it is: where the file now holds another patch at that position, what
+        // plays becomes an edit of it. Returns true when the bank changed.
+        bool refreshMatrixBankFromDisk();
+        // Goes up whenever the programs of the loaded bank may have changed, also under the
+        // same file name: the editor rebuilds its patch list then.
+        uint32_t getBankGeneration() const { return m_bankGeneration; }
 
         // ── Trackermeister (tracker module player) ─────────────────────────
         // The device owns the transport: note 12 plays, 14 stops, 13 and 15 step a
@@ -417,8 +455,36 @@ namespace retromulator
             return v;
         }
 
+        // True the first time it is asked, once per instance: the editor starts the
+        // Matrix core when it first opens on an instance that has none.
+        bool consumeAutoStart()
+        {
+            const bool v = m_autoStartPending;
+            m_autoStartPending = false;
+            return v;
+        }
+
+        // GPL editor: the patch editor under the panel stays open when the window is reopened.
+        bool m_editPanelOpen = false;
+
+        // Finish of the GPL editor's panel, shared by every instance.
+        static bool isWhitePanel();
+        static void setWhitePanel(bool white);
+
     private:
         SynthType   m_synthType = SynthType::None;
+        bool        m_autoStartPending = true;
+        bool        m_matrixInitPatch = false;
+        // the bank file as it was when it was last compared with the loaded bank
+        juce::int64 m_bankFileStamp = 0;
+        juce::int64 m_bankFileSize  = -1;
+        uint32_t    m_bankGeneration = 0;
+        // A program change that came in as MIDI, taken off the audio thread: the firmware
+        // would load from its own memory, which is not the bank the panel shows.
+        struct ProgramChangeRelay;
+        std::unique_ptr<ProgramChangeRelay> m_programRelay;
+        std::atomic<int> m_midiProgramChange{-1};
+        void applyMidiProgramChange();
         std::string m_romPath;
         std::unique_ptr<ParameterPool> m_paramPool;
 

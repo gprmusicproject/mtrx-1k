@@ -1,14 +1,25 @@
 #include "BasicEditor.h"
 #include "SynthFactory.h"
 #include "synthLib/midiToSysex.h"
+#include "jucePluginLib/version.h"
 #include "ronaldo/88emu/88lib/deviceModel.h"
 #include "ronaldo/88emu/88lib/romloader.h"
 #include <climits>
+#include <cmath>
 #include <fstream>
 
 namespace retromulator
 {
     static constexpr const char* kSoundFilePattern = "*.sfz;*.sf2;*.wav;*.aif;*.aiff;*.flac;*.ogg;*.zbp;*.zbb";
+
+    // The panel refreshes at this rate; updateStatus keeps its 2 Hz pace because it scans folders.
+    static constexpr int kPanelTimerHz = 16;
+
+    // matrixLib dumps the patch EPROM into "!ROM Bank 2.syx" to "!ROM Bank 9.syx".
+    static constexpr const char* kMatrixRomBankPrefix = "!ROM Bank ";
+
+    // Name printed on the panel.
+    static constexpr const char* kPanelName = "MTRX-1K";
 
     static bool isAkaiSampler(SynthType type) { return type == SynthType::AkaiS1000; }
 
@@ -66,22 +77,13 @@ namespace retromulator
     }
 
     BasicEditor::BasicEditor(HeadlessProcessor& p)
-        : AudioProcessorEditor(p), m_proc(p)
+        : AudioProcessorEditor(p), m_proc(p), m_about(kPanelName, g_pluginVersionString), m_editPanel(p)
     {
-        setSize(640, 80);
+        setLookAndFeel(&m_lookAndFeel);
+        setSize(rackPanel::kWidth, rackPanel::kHeight);
         setResizable(false, false);
 
-        // ── Synth combo ──────────────────────────────────────────────────────
-        m_synthCombo.addItem("None", 1);
-        int displayCount = 0;
-        const auto* displayOrder = synthTypeDisplayOrder(displayCount);
-        for(int i = 0; i < displayCount; ++i)
-            m_synthCombo.addItem(synthTypeName(displayOrder[i]),
-                                 static_cast<int>(displayOrder[i]) + 2);
-        m_synthCombo.setSelectedId(static_cast<int>(m_proc.getSynthType()) + 2,
-                                   juce::dontSendNotification);
-        m_synthCombo.onChange = [this] { onSynthTypeChanged(); };
-        addAndMakeVisible(m_synthCombo);
+        setTheme(HeadlessProcessor::isWhitePanel() ? rackPanel::Theme::White : rackPanel::Theme::Black);
 
         // ── Prev / Next buttons ──────────────────────────────────────────────
         // Shift+click jumps to the previous/next bank folder
@@ -187,17 +189,7 @@ namespace retromulator
 
                 SynthFactory::setEmu88Model(model);
 
-                juce::Component::SafePointer<BasicEditor> safe(this);
-                m_proc.setSynthTypeAsync(SynthType::Emu88, {}, [safe]
-                {
-                    if(!safe) return;
-                    if(safe->m_proc.isFirmwareMissing())
-                    {
-                        safe->onFirmwareMissing(SynthType::Emu88);
-                        return;
-                    }
-                    safe->updateStatus();
-                });
+                startCore(SynthType::Emu88);
                 return;
             }
 
@@ -260,39 +252,134 @@ namespace retromulator
         m_statusLabel.setJustificationType(juce::Justification::centredRight);
         addAndMakeVisible(m_statusLabel);
 
+        // ── Rack panel ───────────────────────────────────────────────────────
+        // Audio taper: the knob's travel is the square root of the gain.
+        m_volume.onValueChange = [this]
+        {
+            const auto v = static_cast<float>(m_volume.getValue());
+            m_proc.setOutputGain(v * v);
+        };
+        addAndMakeVisible(m_volume);
+
+        m_selectBtn.onClick = [this]
+        {
+            m_mode = (m_mode == PanelMode::Patch) ? PanelMode::Bank : PanelMode::Patch;
+            m_entry.clear();
+            refreshPanel();
+        };
+        m_bankLockBtn.onClick = [this]
+        {
+            m_bankLock = !m_bankLock;
+            refreshPanel();
+        };
+        m_enterBtn.onClick = [this] { commitPanelEntry(); };
+        m_plusBtn.onClick  = [this] { onPanelStep(+1); };
+        m_minusBtn.onClick = [this] { onPanelStep(-1); };
+        m_power.onClick    = [this] { onPowerSwitch(); };
+        m_themeSwitch.onClick = [this]
+        {
+            const auto theme = m_theme == rackPanel::Theme::White ? rackPanel::Theme::Black : rackPanel::Theme::White;
+            HeadlessProcessor::setWhitePanel(theme == rackPanel::Theme::White);
+            setTheme(theme);
+        };
+
+        // Names for screen readers; the legends are painted on the panel, not on the keys.
+        m_volume.setTitle("Volume");
+        m_selectBtn.setTitle("Select");
+        m_bankLockBtn.setTitle("Bank Lock");
+        m_enterBtn.setTitle("Enter");
+        m_minusBtn.setTitle("-");
+        m_themeSwitch.setTitle("Panel");
+        m_bankCombo.setTitle("Bank");
+        m_progCombo.setTitle("Patch");
+
+        for(auto* b : { &m_selectBtn, &m_bankLockBtn, &m_enterBtn, &m_plusBtn, &m_minusBtn })
+            addAndMakeVisible(*b);
+
+        for(int i = 0; i < 10; ++i)
+        {
+            auto& b = m_digitBtns[static_cast<size_t>(i)];
+            b = std::make_unique<PanelButton>(juce::String(i));
+            b->onClick = [this, i] { onPanelDigit(i); };
+            addAndMakeVisible(*b);
+        }
+
+        addAndMakeVisible(m_display);
+        addAndMakeVisible(m_power);
+        addAndMakeVisible(m_themeSwitch);
+
+        m_aboutBtn.onClick = [this]
+        {
+            m_about.setVisible(true);
+            m_about.toFront(false);
+        };
+        addAndMakeVisible(m_aboutBtn);
+
+        m_editBtn.setClickingTogglesState(true);
+        m_editBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff1f5fb0));
+        m_editBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+        m_editBtn.onClick = [this] { setEditOpen(m_editBtn.getToggleState()); };
+        addAndMakeVisible(m_editBtn);
+        m_editPanel.onProgramChanged = [this] { updateStatus(); };
+        m_editPanel.setTheme(m_theme);
+        addChildComponent(m_editPanel);
+
+        addChildComponent(m_about);
+        resized();
+
         updateStatus();
-        startTimerHz(2);
+        startTimerHz(kPanelTimerHz);
+
+        if(m_proc.m_editPanelOpen)
+            setEditOpen(true);
+
+        // The unit powers up as a Matrix-1000. Only the first editor of an instance does
+        // this, so one that was switched off stays off when its window is reopened.
+        if(m_proc.consumeAutoStart() && m_proc.getSynthType() == SynthType::None && !m_proc.m_isBooting.load())
+            startCore(SynthType::Matrix);
     }
 
     void BasicEditor::paint(juce::Graphics& g)
     {
-        g.fillAll(juce::Colour(0xff222222));
-        g.setColour(juce::Colours::white);
-        g.setFont(14.f);
-        g.drawText("Retromulator", 29, 0, 120, getHeight(),
-                   juce::Justification::centredLeft, false);
+        g.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
+        g.drawImage(m_background, juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(rackPanel::kWidth), static_cast<float>(rackPanel::kHeight)));
+
+        rackPanel::drawTitle(g, m_theme, kPanelName);
+        for(int i = 0; i < rackPanel::kLedCount; ++i)
+            rackPanel::drawLed(g, i, m_leds[static_cast<size_t>(i)]);
     }
 
     void BasicEditor::resized()
     {
-        const int h   = getHeight();
-        const int ctH = 28;
-        const int y   = (h - ctH) / 2;
-        const int pad = 4;
+        using namespace rackPanel;
 
-        const bool isOpenWurli = (m_proc.getSynthType() == SynthType::OpenWurli);
+        // Rack unit, positions taken from the Matrix-1000 front panel
+        constexpr int keyW = 28, keyH = 20, upperRowY = 22, lowerRowY = 56;
 
-        int x = 130;
-        m_synthCombo.setBounds(x, y, 110, ctH); x += 110 + pad;
-        m_prevBtn.setEnabled(!isOpenWurli);
-        m_prevBtn   .setBounds(x, y,  24, ctH); x +=  24 + 2;
-        m_nextBtn.setEnabled(!isOpenWurli);
-        m_nextBtn   .setBounds(x, y,  24, ctH); x +=  24 + pad;
-        m_progCombo.setEnabled(!isOpenWurli);
-        m_progCombo .setBounds(x, y, 160, ctH); x += 160 + pad;
-        m_bankCombo.setEnabled(!isOpenWurli);
-        m_bankCombo .setBounds(x, y, 160, ctH); x += 160 + pad;
-        m_statusLabel.setBounds(x, y, getWidth() - x - 4, ctH);
+        m_volume     .setBounds(102, 40, 34, 34);
+        m_selectBtn  .setBounds(162, lowerRowY, keyW, keyH);
+        m_bankLockBtn.setBounds(423, lowerRowY, keyW, keyH);
+        m_display    .setBounds(484, 27, 91, 46);
+        m_enterBtn   .setBounds(605, lowerRowY, keyW, keyH);
+        m_plusBtn    .setBounds(652, upperRowY, keyW, keyH);
+        m_minusBtn   .setBounds(652, lowerRowY, keyW, keyH);
+        for(int i = 0; i < 10; ++i)
+            if(auto& b = m_digitBtns[static_cast<size_t>(i)])
+                b->setBounds(697 + (i % 5) * 34, i < 5 ? upperRowY : lowerRowY, keyW, keyH);
+        m_power      .setBounds(974, 31, 32, 40);
+        m_themeSwitch.setBounds(kThemeSwitchX, kThemeSwitchY, kThemeSwitchW, kThemeSwitchH);
+
+        // Browser strip
+        const int y = kStripControlY, h = kStripControlH;
+        m_aboutBtn  .setBounds(kAboutX, kAboutY, kAboutW, kAboutH);
+        m_about     .setBounds(0, 0, kWidth, kHeight);
+        m_editBtn   .setBounds(kStripEditX, y, kStripEditW, h);
+        m_editPanel .setBounds(0, kHeight, kWidth, EditPanel::kHeight);
+        m_bankCombo .setBounds(kStripBankX, y, kStripBankW, h);
+        m_prevBtn   .setBounds(kStripNavX, y, 24, h);
+        m_nextBtn   .setBounds(kStripNavX + 26, y, 24, h);
+        m_progCombo .setBounds(kStripPatchX, y, kStripPatchW, h);
+        m_statusLabel.setBounds(kStripPatchX + kStripPatchW + 6, y, getWidth() - (kStripPatchX + kStripPatchW + 6) - 8, h);
     }
 
     void BasicEditor::refreshBankCombo()
@@ -455,15 +542,15 @@ namespace retromulator
 
     void BasicEditor::updateStatus()
     {
-        if(m_proc.consumeEditorSizeDirty())
-        {
-            const int w = m_proc.getSavedEditorWidth();
-            const int h = m_proc.getSavedEditorHeight();
-            if(w > 0 && h > 0)
-                setSize(w, h);
-        }
+        // The panel has one size, so a size saved with the session is not applied.
+        m_proc.consumeEditorSizeDirty();
 
-        if(m_proc.isFirmwareMissing() || !m_proc.getPlugin().isValid())
+        if(m_proc.m_isBooting.load())
+        {
+            m_statusLabel.setText("Booting", juce::dontSendNotification);
+            m_statusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+        }
+        else if(m_proc.isFirmwareMissing() || !m_proc.getPlugin().isValid())
         {
             m_statusLabel.setText("No firmware", juce::dontSendNotification);
             m_statusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
@@ -478,10 +565,15 @@ namespace retromulator
             m_statusLabel.setText("Ready", juce::dontSendNotification);
             m_statusLabel.setColour(juce::Label::textColourId, juce::Colours::limegreen);
         }
+        // Nothing to report while the unit is switched off.
+        m_statusLabel.setVisible(m_proc.getSynthType() != SynthType::None);
 
         const juce::String currentPath(normalisePath(m_proc.getSysexFilePath()));
-        const bool bankChanged = (currentPath != m_lastSysexPath);
+        // the same file can come back with other patches in it: saved into, or changed on disk
+        const auto generation = m_proc.getBankGeneration();
+        const bool bankChanged = (currentPath != m_lastSysexPath) || generation != m_lastBankGeneration;
         m_lastSysexPath = currentPath;
+        m_lastBankGeneration = generation;
 
         const auto type = m_proc.getSynthType();
         const juce::File synthFolder(HeadlessProcessor::getSynthDataFolder(type));
@@ -543,7 +635,7 @@ namespace retromulator
                 m_progCombo.clear(juce::dontSendNotification);
                 for(int i = 0; i < progCount; ++i)
                 {
-                    const juce::String num = juce::String(i + 1).paddedLeft('0', 3);
+                    const juce::String num = juce::String(patchDisplayNumber(i)).paddedLeft('0', 3);
                     const juce::String name = (i < static_cast<int>(names.size()) && !names[static_cast<size_t>(i)].empty())
                         ? (num + "  " + juce::String(names[static_cast<size_t>(i)]))
                         : num;
@@ -561,7 +653,7 @@ namespace retromulator
                     ? juce::String{}
                     : juce::File(currentPath).getFileNameWithoutExtension();
                 const bool hasPatchName = !patch.isEmpty() && patch != bankStr;
-                const juce::String num = juce::String(progIdx + 1).paddedLeft('0', 3);
+                const juce::String num = juce::String(patchDisplayNumber(progIdx)).paddedLeft('0', 3);
                 m_progCombo.changeItemText(progIdx + 1, hasPatchName ? (num + "  " + patch) : num);
             }
 
@@ -576,6 +668,8 @@ namespace retromulator
             m_bankCombo.clear(juce::dontSendNotification);
 
         refreshBankCombo();
+        refreshPanel();
+        m_editPanel.setPatchTitle(m_progCombo.getText());
     }
 
     void BasicEditor::onLoadSysex()
@@ -826,6 +920,8 @@ namespace retromulator
                     updateStatus();
                     return;
                 }
+
+                if(m_bankLock) return;
             }
 
             juce::Array<juce::File> subs;
@@ -871,6 +967,8 @@ namespace retromulator
                     return;
                 }
             }
+
+            if(m_bankLock && count > 0) return;
 
             const juce::File synthFolder2(HeadlessProcessor::getSynthDataFolder(type));
             juce::Array<juce::File> files;
@@ -936,68 +1034,6 @@ namespace retromulator
         updateStatus();
     }
 
-    void BasicEditor::applyLoadedRom(SynthType type, const juce::String& romFolder)
-    {
-        m_proc.setSynthType(type, romFolder.toStdString());
-
-        if(m_proc.isFirmwareMissing())
-        {
-            m_proc.setSynthType(SynthType::None);
-            m_synthCombo.setSelectedId(1, juce::dontSendNotification);
-            updateStatus();
-
-            juce::NativeMessageBox::showAsync(
-                juce::MessageBoxOptions()
-                    .withIconType(juce::MessageBoxIconType::WarningIcon)
-                    .withTitle("Invalid Firmware")
-                    .withMessage("The selected file is not a valid firmware for " +
-                                 juce::String(synthTypeName(type)) + ".")
-                    .withButton("OK"),
-                nullptr);
-            return;
-        }
-
-        m_synthCombo.setSelectedId(static_cast<int>(type) + 2, juce::dontSendNotification);
-        m_currentBankFolder.clear();
-
-        const juce::File folder(HeadlessProcessor::getSynthDataFolder(type));
-        if(isFolderMode(type, folder))
-        {
-            juce::Array<juce::File> subs;
-            folder.findChildFiles(subs, juce::File::findDirectories, false);
-            subs.sort();
-            if(!subs.isEmpty())
-            {
-                m_currentBankFolder = subs[0].getFullPathName();
-                juce::Array<juce::File> patches;
-                findSysexFiles(subs[0], patches);
-                patches.sort();
-                if(!patches.isEmpty())
-                    m_proc.loadPresetFromFile(patches[0].getFullPathName().toStdString(),
-                                              patches[0].getFileNameWithoutExtension().toStdString());
-            }
-        }
-        else
-        {
-            juce::Array<juce::File> files;
-            if(isAkaiSampler(type))
-                findSoundFiles(folder, files);
-            else
-                findBankFiles(type, folder, files);
-            files.sort();
-            if(!files.isEmpty())
-            {
-                if(isAkaiSampler(type))
-                    m_proc.loadSoundFile(files[0].getFullPathName().toStdString());
-                else
-                    m_proc.loadPresetFromFile(files[0].getFullPathName().toStdString(),
-                                              files[0].getFileNameWithoutExtension().toStdString(), 0);
-            }
-        }
-
-        updateStatus();
-    }
-
     void BasicEditor::updateMatrixLfoSyncItems()
     {
         for(int lfo = 0; lfo < 2; ++lfo)
@@ -1040,44 +1076,50 @@ namespace retromulator
 
     void BasicEditor::onFirmwareMissing(SynthType type)
     {
+        m_firmwareMissingLatch = true;
         m_proc.setSynthType(SynthType::None);
-        m_synthCombo.setSelectedId(1, juce::dontSendNotification);
         updateStatus();
 
-        const juce::String romFolder(HeadlessProcessor::getDataFolder() + "ROM/");
-        juce::File(romFolder).createDirectory();
+        const juce::File romFolder(HeadlessProcessor::getDataFolder() + "ROM/");
+        romFolder.createDirectory();
 
-        m_fileChooser = std::make_shared<juce::FileChooser>(
-            "Select firmware file for " + juce::String(synthTypeName(type)),
-            juce::File(romFolder),
-            "*.bin;*.mid;*.rom");
+        const juce::String what = type == SynthType::Matrix
+            ? juce::String("Firmware not found: the 32 KB system EPROM of the Matrix-1000 as a .bin file, "
+                           "and optionally its 64 KB patch EPROM.")
+            : juce::String(synthTypeName(type)) + " firmware not found.";
 
-        juce::Component::SafePointer<BasicEditor> safe(this);
-        m_fileChooser->launchAsync(
-            juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-            [safe, type, romFolder](const juce::FileChooser& fc)
-            {
-                if(!safe) return;
-                const auto chosen = fc.getResult();
-                if(!chosen.existsAsFile()) return;
-
-                const juce::File dest = juce::File(romFolder).getChildFile(chosen.getFileName());
-                chosen.copyFileTo(dest);
-
-                safe->applyLoadedRom(type, romFolder);
-
-                if(safe && safe->m_proc.isFirmwareMissing())
-                    dest.deleteFile();
-            });
+        juce::NativeMessageBox::showAsync(
+            juce::MessageBoxOptions()
+                .withIconType(juce::MessageBoxIconType::WarningIcon)
+                .withTitle("MTRX-1K")
+                .withMessage(what + "\n\n"
+                             "The firmware file needs to be copied to\n"
+                             + romFolder.getFullPathName() + "\n\n"
+                             "The target folder will be opened once you click OK. Copy the firmware "
+                             "to this folder and switch the unit on with Power.")
+                .withButton("OK")
+                .withAssociatedComponent(this),
+            [romFolder](int) { romFolder.startAsProcess(); });
     }
 
-    void BasicEditor::onSynthTypeChanged()
+    void BasicEditor::startCore(const SynthType type)
     {
-        const auto newType = static_cast<SynthType>(m_synthCombo.getSelectedId() - 2);
-
+        m_firmwareMissingLatch = false;
+        m_entry.clear();
         m_currentBankFolder.clear();
-        m_proc.setSynthType(newType, {});
 
+        // The completion runs on the message thread; at once when the unit is switched off.
+        juce::Component::SafePointer<BasicEditor> safe(this);
+        m_proc.setSynthTypeAsync(type, {}, [safe, type]
+        {
+            if(safe)
+                safe->onCoreStarted(type);
+        });
+        updateStatus();
+    }
+
+    void BasicEditor::onCoreStarted(const SynthType newType)
+    {
         if(newType == SynthType::None)
         {
             updateStatus();
@@ -1090,8 +1132,12 @@ namespace retromulator
             return;
         }
 
-        m_synthCombo.setSelectedId(static_cast<int>(m_proc.getSynthType()) + 2,
-                                   juce::dontSendNotification);
+        // A state the host restored while the core was booting stays as it is.
+        if(m_proc.getProgramCount() > 0)
+        {
+            updateStatus();
+            return;
+        }
 
         const juce::File folder(HeadlessProcessor::getSynthDataFolder(newType));
         if(isFolderMode(newType, folder))
@@ -1129,5 +1175,337 @@ namespace retromulator
         }
 
         updateStatus();
+    }
+    // ── Rack panel ────────────────────────────────────────────────────────
+
+    void BasicEditor::timerCallback()
+    {
+        if(m_entryTicks > 0 && --m_entryTicks == 0)
+            m_entry.clear();
+        if(m_flashTicks > 0)
+            --m_flashTicks;
+
+        if(++m_statusTicks >= kPanelTimerHz / 2)
+        {
+            m_statusTicks = 0;
+            // another instance may have saved into the bank that is loaded here
+            m_proc.refreshMatrixBankFromDisk();
+            // a session restored while the window is open brings its own setting
+            if(m_proc.m_editPanelOpen != m_editPanel.isVisible())
+                setEditOpen(m_proc.m_editPanelOpen);
+            updateStatus();
+        }
+        else
+        {
+            refreshPanel();
+        }
+
+        if(m_editPanel.isVisible())
+            m_editPanel.refresh();
+    }
+
+    void BasicEditor::refreshPanel()
+    {
+        const auto type    = m_proc.getSynthType();
+        const bool powered = type != SynthType::None;
+        const bool booting = m_proc.m_isBooting.load();
+
+        if(powered)
+            m_firmwareMissingLatch = false;
+
+        m_power.setToggleState(powered || booting, juce::dontSendNotification);
+        m_themeSwitch.setToggleState(m_theme == rackPanel::Theme::White, juce::dontSendNotification);
+
+        // Nothing can be loaded into a unit that is off or still booting.
+        const bool usable = powered && !booting && type != SynthType::OpenWurli;
+        for(juce::Component* c : { static_cast<juce::Component*>(&m_bankCombo), static_cast<juce::Component*>(&m_progCombo),
+                                   static_cast<juce::Component*>(&m_prevBtn), static_cast<juce::Component*>(&m_nextBtn) })
+            if(c->isEnabled() != usable)
+                c->setEnabled(usable);
+
+        // Follows a gain restored with the session; left alone while it is being turned.
+        if(!m_volume.isMouseButtonDown())
+            m_volume.setValue(std::sqrt(juce::jlimit(0.0f, 1.0f, m_proc.getOutputGain())),
+                              juce::dontSendNotification);
+
+        juce::String text;
+        if(!powered && !booting)
+            text = "   ";
+        else if(m_flashTicks > 0)
+            text = m_flash;
+        else if(m_entry.isNotEmpty())
+        {
+            if(m_mode == PanelMode::Bank)
+                text = "b" + m_entry.paddedRight('-', 2);
+            else if(patchEntryLength() == 2)   // locked Matrix bank: its digit stays put
+                text = juce::String(matrixBankBase() / 100) + m_entry.paddedRight('-', 2);
+            else
+                text = m_entry.paddedRight('-', 3);
+        }
+        else if(booting)
+            text = "---";
+        else if(m_mode == PanelMode::Bank)
+        {
+            // The Matrix shows its own bank digit, the other cores the position in the bank list.
+            const int n = currentBankNumber();
+            if(type == SynthType::Matrix)
+                text = "b " + juce::String(matrixBankBase() / 100);
+            else
+                text = n > 0 ? "b" + juce::String(n % 100).paddedLeft('0', 2) : juce::String("b--");
+        }
+        else
+        {
+            const int n = m_progCombo.getSelectedId();
+            text = n > 0 ? juce::String(patchDisplayNumber(n - 1) % 1000).paddedLeft('0', 3) : juce::String("---");
+        }
+        m_display.setText(text);
+        m_display.setDot(powered && m_bankLock);
+
+        const bool noRom = powered ? (m_proc.isFirmwareMissing() || !m_proc.getPlugin().isValid())
+                                   : m_firmwareMissingLatch;
+        const bool error = powered && !noRom && m_proc.hasDeviceError();
+
+        const std::array<bool, rackPanel::kLedCount> leds
+        {
+            powered && m_mode == PanelMode::Patch,
+            powered && m_mode == PanelMode::Bank,
+            powered && !booting && !noRom && !error,
+            booting,
+            noRom,
+            error
+        };
+
+        if(leds != m_leds)
+        {
+            m_leds = leds;
+            repaint(0, 0, getWidth(), rackPanel::kUnitHeight);
+        }
+    }
+
+    void BasicEditor::flashPanel(const juce::String& text)
+    {
+        m_flash = text;
+        m_flashTicks = kPanelTimerHz;
+        refreshPanel();
+    }
+
+    void BasicEditor::onPanelDigit(int digit)
+    {
+        if(m_proc.getSynthType() == SynthType::None || m_proc.m_isBooting.load())
+            return;
+
+        m_entry += juce::String(digit);
+        m_entryTicks = kPanelTimerHz * 3;
+        m_flashTicks = 0;
+
+        // The number is taken as soon as it is complete, as on the hardware.
+        const bool matrix = m_proc.getSynthType() == SynthType::Matrix;
+        if(m_entry.length() >= (m_mode == PanelMode::Bank ? (matrix ? 1 : 2) : patchEntryLength()))
+            commitPanelEntry();
+        else
+            refreshPanel();
+    }
+
+    void BasicEditor::commitPanelEntry()
+    {
+        if(m_entry.isEmpty())
+            return;
+
+        const int number = m_entry.getIntValue();
+        m_entry.clear();
+        m_entryTicks = 0;
+
+        if(m_mode == PanelMode::Bank)
+            selectBankNumber(number);
+        else
+            selectPatchNumber(number);
+    }
+
+    void BasicEditor::onPanelStep(int delta)
+    {
+        if(m_proc.getSynthType() == SynthType::None || m_proc.m_isBooting.load())
+            return;
+
+        m_entry.clear();
+        if(m_mode == PanelMode::Bank)
+            stepBank(delta);
+        else
+            navigatePatch(delta);
+        refreshPanel();
+    }
+
+    int BasicEditor::matrixBankBase() const
+    {
+        const juce::String name = juce::File(m_proc.getSysexFilePath()).getFileNameWithoutExtension();
+        return name.startsWith(kMatrixRomBankPrefix) ? name.getTrailingIntValue() * 100 : 0;
+    }
+
+    int BasicEditor::matrixBankItemId(int bank) const
+    {
+        // 0 and 1 are the RAM bank; without its file, the first bank that is not a ROM bank
+        const juce::String wanted = bank >= 2
+            ? juce::String(kMatrixRomBankPrefix) + juce::String(bank)
+            : juce::File(HeadlessProcessor::getMatrixRamBankPath()).getFileNameWithoutExtension();
+        int fallback = 0;
+        for(const int id : bankItemIds())
+        {
+            const juce::String text = m_bankCombo.getItemText(m_bankCombo.indexOfItemId(id));
+            if(text == wanted)
+                return id;
+            if(bank < 2 && fallback == 0 && !text.startsWith(kMatrixRomBankPrefix))
+                fallback = id;
+        }
+        return fallback;
+    }
+
+    int BasicEditor::patchDisplayNumber(int index) const
+    {
+        if(m_proc.getSynthType() == SynthType::Matrix)
+            return matrixBankBase() + index;
+        return index + 1;
+    }
+
+    int BasicEditor::patchEntryLength() const
+    {
+        return (m_proc.getSynthType() == SynthType::Matrix && m_bankLock) ? 2 : 3;
+    }
+
+    void BasicEditor::selectPatchNumber(int number)
+    {
+        int index = number - 1;   // numbered as in the patch list, from 001
+
+        if(m_proc.getSynthType() == SynthType::Matrix)
+        {
+            index = number;
+
+            if(!m_bankLock)
+            {
+                // The hundreds digit picks the bank. A bank that is not a ROM bank counts
+                // on from 000, and is kept if it is the one already loaded.
+                const int bank = number / 100;
+                const bool wantRom = bank >= 2;
+                const bool onRomBank = juce::File(m_proc.getSysexFilePath()).getFileNameWithoutExtension()
+                                           .startsWith(kMatrixRomBankPrefix);
+
+                int target = (!wantRom && !onRomBank) ? m_bankCombo.getSelectedId() : 0;
+                if(target == 0)
+                    target = matrixBankItemId(bank);
+
+                if(target == 0)
+                {
+                    flashPanel("Err");
+                    return;
+                }
+
+                if(wantRom)
+                    index = number % 100;
+                if(target != m_bankCombo.getSelectedId())
+                    m_bankCombo.setSelectedId(target, juce::sendNotificationSync);
+            }
+        }
+
+        if(!m_progCombo.isEnabled() || index < 0 || index >= m_progCombo.getNumItems())
+        {
+            flashPanel("Err");
+            return;
+        }
+
+        m_progCombo.setSelectedId(index + 1, juce::sendNotificationSync);
+        refreshPanel();
+    }
+
+    std::vector<int> BasicEditor::bankItemIds() const
+    {
+        std::vector<int> ids;
+        for(int i = 0; i < m_bankCombo.getNumItems(); ++i)
+        {
+            const int id = m_bankCombo.getItemId(i);
+            const bool isFile  = id > 0 && id < 9000;
+            const bool isBoard = id >= kEmu88BoardFirst && id < kEmu88BoardFirst + 100;
+            if(isFile || isBoard)
+                ids.push_back(id);
+        }
+        return ids;
+    }
+
+    int BasicEditor::currentBankNumber() const
+    {
+        const auto ids = bankItemIds();
+        const int selected = m_bankCombo.getSelectedId();
+        for(size_t i = 0; i < ids.size(); ++i)
+            if(ids[i] == selected)
+                return static_cast<int>(i) + 1;
+        return 0;
+    }
+
+    void BasicEditor::selectBankNumber(int number)
+    {
+        const auto ids = bankItemIds();
+        int target = 0;
+        if(m_proc.getSynthType() == SynthType::Matrix)
+            target = matrixBankItemId(number);
+        else if(number >= 1 && number <= static_cast<int>(ids.size()))
+            target = ids[static_cast<size_t>(number - 1)];
+
+        if(!m_bankCombo.isEnabled() || target == 0)
+        {
+            flashPanel("Err");
+            return;
+        }
+
+        m_bankCombo.setSelectedId(target, juce::sendNotificationSync);
+        refreshPanel();
+    }
+
+    void BasicEditor::stepBank(int delta)
+    {
+        const auto ids = bankItemIds();
+        if(ids.empty() || !m_bankCombo.isEnabled())
+            return;
+
+        const int count   = static_cast<int>(ids.size());
+        const int current = currentBankNumber() - 1;
+        const int next    = current < 0 ? 0 : (current + delta + count) % count;
+        m_bankCombo.setSelectedId(ids[static_cast<size_t>(next)], juce::sendNotificationSync);
+    }
+
+    void BasicEditor::onPowerSwitch()
+    {
+        // The switch does nothing while the unit boots.
+        if(!m_proc.m_isBooting.load())
+        {
+            const auto type = m_proc.getSynthType();
+            if(type != SynthType::None)
+            {
+                m_powerOffType = type;
+                startCore(SynthType::None);
+            }
+            else
+            {
+                // A session saved with another core comes back with that one.
+                startCore(m_powerOffType != SynthType::None ? m_powerOffType : SynthType::Matrix);
+            }
+        }
+        refreshPanel();
+    }
+
+    void BasicEditor::setEditOpen(const bool open)
+    {
+        m_proc.m_editPanelOpen = open;
+        m_editBtn.setToggleState(open, juce::dontSendNotification);
+        m_editPanel.setVisible(open);
+        if(open)
+            m_editPanel.refresh();
+        setSize(rackPanel::kWidth, rackPanel::kHeight + (open ? EditPanel::kHeight : 0));
+    }
+
+    void BasicEditor::setTheme(const rackPanel::Theme theme)
+    {
+        m_theme = theme;
+        m_background = rackPanel::createBackground(theme, { "Patch", "Bank", "Ready", "Boot", "No\nROM", "Error" });
+        m_themeSwitch.setToggleState(theme == rackPanel::Theme::White, juce::dontSendNotification);
+        m_aboutBtn.setTheme(theme);
+        m_editPanel.setTheme(theme);
+        repaint();
     }
 }

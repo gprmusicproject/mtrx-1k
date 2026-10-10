@@ -267,6 +267,15 @@ namespace matrixLib
 		return effective(c.reload);
 	}
 
+	uint32_t Pit8254::getWrittenPeriod(const uint32_t _counter, const uint64_t _tick)
+	{
+		auto& c = m_counters[_counter];
+		update(c, _tick);
+		if(!c.running || (c.mode != 2 && c.mode != 3))
+			return 0;
+		return effective(c.hasPending ? c.pendingReload : c.reload);
+	}
+
 	uint64_t Pit8254::nextOutEdge(const uint32_t _counter, const uint64_t _tick)
 	{
 		auto& c = m_counters[_counter];

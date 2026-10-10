@@ -191,4 +191,10 @@ namespace matrixLib::patch
 	{
 		return {0xf0, IdOberheim, IdMatrix, OpParameter, static_cast<uint8_t>(_number & 0x7f), static_cast<uint8_t>(_value & 0x7f), 0xf7};
 	}
+
+	std::vector<uint8_t> createMatrixChange(const uint8_t _bus, const uint8_t _source, const int _amount, const uint8_t _destination)
+	{
+		return {0xf0, IdOberheim, IdMatrix, OpMatrixParameter, static_cast<uint8_t>(_bus & 0x7f), static_cast<uint8_t>(_source & 0x7f),
+			static_cast<uint8_t>(_amount & 0x7f), static_cast<uint8_t>(_destination & 0x7f), 0xf7};
+	}
 }

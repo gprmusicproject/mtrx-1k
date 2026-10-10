@@ -36,6 +36,7 @@
 #include "dx7Lib/romloader.h"
 #include "matrixLib/device.h"
 #include "matrixLib/patch.h"
+#include "matrixLib/patchNames.h"
 #include "matrixLib/romloader.h"
 #include "virusLib/deviceModel.h"
 #include "virusLib/microcontrollerTypes.h"
@@ -84,15 +85,15 @@ namespace retromulator
 #if defined(_WIN32)
         const char* docs = std::getenv("USERPROFILE");
         if(!docs) docs = "";
-        return std::string(docs) + "\\Documents\\discoDSP\\Retromulator\\";
+        return std::string(docs) + "\\Documents\\GPR Music Project\\MTRX-1K\\";
 #elif defined(__APPLE__)
         const char* home = std::getenv("HOME");
         if(!home) home = "";
-        return std::string(home) + "/Library/Application Support/discoDSP/Retromulator/";
+        return std::string(home) + "/Library/Application Support/GPR Music Project/MTRX-1K/";
 #else
         const char* home = std::getenv("HOME");
         if(!home) home = "";
-        return std::string(home) + "/Documents/discoDSP/Retromulator/";
+        return std::string(home) + "/Documents/GPR Music Project/MTRX-1K/";
 #endif
     }
 
@@ -107,7 +108,7 @@ namespace retromulator
 
     std::string HeadlessProcessor::getSynthDataFolder(SynthType type)
     {
-        return getDataFolder() + synthTypeName(type) + "/";
+        return getDataFolder() + synthFolderName(type) + "/";
     }
 
     static juce::File getSettingsFile()
@@ -205,6 +206,16 @@ namespace retromulator
 
         xml->setAttribute(attribute, value);
         xml->writeTo(file);
+    }
+
+    bool HeadlessProcessor::isWhitePanel()
+    {
+        return readSettingsBool("whitePanel", false);
+    }
+
+    void HeadlessProcessor::setWhitePanel(const bool white)
+    {
+        writeSettingsBool("whitePanel", white);
     }
 
     // ── GPL boundary helpers ─────────────────────────────────────────────────
@@ -534,6 +545,16 @@ namespace retromulator
     // ── Constructor ───────────────────────────────────────────────────────────
 
     // Defined ahead of the constructor: the unique_ptr member needs the complete type.
+    struct HeadlessProcessor::ProgramChangeRelay final : juce::AsyncUpdater
+    {
+        explicit ProgramChangeRelay(HeadlessProcessor& p) : proc(p) {}
+        ~ProgramChangeRelay() override { cancelPendingUpdate(); }
+
+        void handleAsyncUpdate() override { proc.applyMidiProgramChange(); }
+
+        HeadlessProcessor& proc;
+    };
+
     struct HeadlessProcessor::PlaylistTimer final : juce::Timer
     {
         explicit PlaylistTimer(HeadlessProcessor& p) : proc(p) {}
@@ -591,13 +612,13 @@ namespace retromulator
                 .withInput ("Input",  juce::AudioChannelSet::stereo(), false)
                 .withOutput("Output", juce::AudioChannelSet::stereo(), true),
             pluginLib::Processor::Properties{
-                "Retromulator",   // name
-                "discoDSP",       // vendor
+                "MTRX-1K",       // name
+                "GPR Music Project",  // vendor
                 true,             // isSynth
                 true,             // wantsMidiInput
                 false,            // producesMidiOut
                 false,            // isMidiEffect
-                "RtMU",           // plugin4CC
+                "Ts1k",           // plugin4CC
                 "",               // lv2Uri
                 pluginLib::Processor::BinaryDataRef{   // parameter descriptions
                     BinaryData::namedResourceListSize,
@@ -610,8 +631,37 @@ namespace retromulator
         getController();
 
         // Host parameters must exist before the host queries the tree.
+        // It reads whether each one can be automated, and its steps, only then: so they are
+        // bound to the Matrix core, the one this product starts, before it is up.
         m_paramPool = std::make_unique<ParameterPool>(*this);
-        m_paramPool->setCore(SynthType::None);
+        m_paramPool->setCore(SynthType::Matrix);
+        m_programRelay = std::make_unique<ProgramChangeRelay>(*this);
+
+        // The product was called TESSERACT-1000 and then MATRIX-1K. The data folder of the
+        // latest of those names, with firmware, banks and calibration, is taken over under
+        // the new name the first time this runs: that is, as long as the new folder holds no
+        // file of its own. Empty folders do not count, something may have created them already.
+        {
+            const juce::File current(getDataFolder());
+            for(const char* earlier : { "MATRIX-1K", "TESSERACT-1000" })
+            {
+                const auto previous = current.getSiblingFile(earlier);
+                if(!previous.isDirectory())
+                    continue;
+                if(current.findChildFiles(juce::File::findFiles, true).isEmpty()
+                   && (!current.exists() || current.deleteRecursively()))
+                    previous.moveFileTo(current);
+                break;
+            }
+
+            // The folder of the bank files was called after the core, Matrix, and is now Patch.
+            const auto patches = current.getChildFile(synthFolderName(SynthType::Matrix));
+            const auto before = current.getChildFile(synthTypeName(SynthType::Matrix));
+            if(before.isDirectory()
+               && patches.findChildFiles(juce::File::findFiles, true).isEmpty()
+               && (!patches.exists() || patches.deleteRecursively()))
+                before.moveFileTo(patches);
+        }
 
         // Seed the ROM search path with the shared data folder so all loaders
         // can find firmware files placed there.
@@ -619,7 +669,7 @@ namespace retromulator
         addRomSearchPath(getDataFolder() + "ROM/");
         // 88emu identifies its ROM sets by content, so its folder is searched recursively.
         // Registered here, not in SynthFactory, because isRomValid() runs before any device exists.
-        ensureDataDirectory(juce::File(getDataFolder() + "88emu/"));
+        // The folder is not created: this product only starts the Matrix core.
         addRomSearchPath(getDataFolder() + "88emu/", true);
 
         // Pre-initialize m_plugin with a silent DummyDevice so that prepareToPlay
@@ -640,6 +690,7 @@ namespace retromulator
     HeadlessProcessor::~HeadlessProcessor()
     {
         m_playlistTimer.reset();
+        m_programRelay.reset();
 
         // Must join before any member is destroyed: ~thread on a joinable
         // thread calls std::terminate.
@@ -661,6 +712,9 @@ namespace retromulator
 
     void HeadlessProcessor::setSynthType(SynthType type, const std::string& romPath)
     {
+        // A boot started from the editor may still be running when the host restores a state.
+        joinBootThread();
+
         m_synthType   = type;
         m_romPath     = romPath;
         m_deviceError = synthLib::DeviceError::None;
@@ -972,7 +1026,16 @@ namespace retromulator
             return dx7Emu::Device::extractPatchName(msg.data(), msg.size());
 
         case SynthType::Matrix:
-            return matrixLib::patch::getName(msg);
+        {
+            // The instrument stores no names. Dumps of the RAM banks carry "BNKb: nn"
+            // placeholders, which stand for the patchbook name of patch b nn.
+            const auto name = matrixLib::patch::getName(msg);
+            const auto digit = [&name](const size_t i) { return name[i] >= '0' && name[i] <= '9'; };
+            if(name.size() == 8 && name.compare(0, 3, "BNK") == 0 && name.compare(4, 2, ": ") == 0 &&
+               digit(3) && digit(6) && digit(7))
+                return matrixLib::g_factoryPatchNames[(name[3] - '0') * 100 + (name[6] - '0') * 10 + (name[7] - '0')];
+            return name;
+        }
 
         default:
             return {};
@@ -1001,6 +1064,20 @@ namespace retromulator
         m_bankMessages = std::move(messages);
         m_sysexData    = sysexData;
         m_patchName    = patchName;
+
+        // Matrix bank dumps carry Set Bank messages (F0 10 06 0A bb F7) between the patches.
+        // They are not programs: left in, every patch after one sits a slot too far down.
+        if(m_synthType == SynthType::Matrix)
+        {
+            synthLib::SysexBufferList patches;
+            for(const auto& msg : m_bankMessages)
+            {
+                if(matrixLib::patch::isSinglePatch(msg.data(), msg.size()))
+                    patches.push_back(msg);
+            }
+            if(!patches.empty())
+                m_bankMessages = std::move(patches);
+        }
 
         // DX7 bulk voice dump: single 4104-byte sysex containing 32 packed voices (128 bytes each).
         // Split into 32 entries so the program browser shows individual voices.
@@ -1080,6 +1157,11 @@ namespace retromulator
         // Send only the selected program, not the entire bank dump.
         if(m_paramPool)
             m_paramPool->clearTouched();
+        m_matrixInitPatch = false;
+        // compared with its file again at the next look
+        m_bankFileStamp = 0;
+        m_bankFileSize  = -1;
+        ++m_bankGeneration;
         sendBankMessage(m_currentProgram);
         updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
                               .withNonParameterStateChanged(true)
@@ -1161,7 +1243,21 @@ namespace retromulator
         // Matrix single patch (F0 10 06 01 nn ...) stores into slot nn of the current bank and
         // is dropped for the ROM banks; opcode 0D loads it into the edit buffer so it plays.
         if(m_synthType == SynthType::Matrix)
+        {
             matrixLib::patch::toEditBuffer(ev.sysex);
+
+            // Edits ride along in the patch: the firmware takes a patch in one go, but drops
+            // most of a run of single parameter edits.
+            if(m_paramPool && m_paramPool->hasPatchEdits())
+            {
+                if(auto data = matrixLib::patch::decode(ev.sysex))
+                {
+                    m_paramPool->writeMatrixPatch(data->data());
+                    const auto edited = matrixLib::patch::encode(*data, matrixLib::patch::OpEditBuffer, 0);
+                    ev.sysex.assign(edited.begin(), edited.end());
+                }
+            }
+        }
 
         // n2x single dump: F0 33 <device> 04 <bank> <prog> ...
         // Bank dumps (bank != 0x00) target stored slots — the synth stores them
@@ -1327,6 +1423,7 @@ namespace retromulator
         // The new patch is now the source of truth; drop stale slot edits.
         if(m_paramPool)
             m_paramPool->clearTouched();
+        m_matrixInitPatch = false;
 
         // Akai S1000: preset switching is handled by the SFZero subsound system,
         // not by sysex bank messages. Route to the correct selector.
@@ -2910,6 +3007,312 @@ namespace retromulator
         }
     }
 
+    // ── Matrix patch editing ──────────────────────────────────────────────────
+
+    namespace
+    {
+        constexpr const char* kMatrixRamBankFile  = "Oberheim Matrix-1000.syx";
+        constexpr const char* kMatrixRomBankStart = "!ROM Bank ";
+
+        // One oscillator as a sawtooth, the filter open and without resonance, every
+        // envelope a plain gate at full level. Both LFOs run at full level but go nowhere,
+        // so a modulation amount is heard as soon as it is turned up.
+        matrixLib::patch::Data matrixInitPatch()
+        {
+            using namespace matrixLib;
+            patch::Data d{};
+            patch::setName(d, "INIT");
+            const auto set = [&d](const uint8_t number, const int value)
+            {
+                if(const auto* p = patch::findParam(number))
+                    d[p->byte] = static_cast<uint8_t>(static_cast<int8_t>(value));
+            };
+            set(6, 2);  set(3, 31); set(7, 3);          // DCO 1: wave, as a sawtooth; pulse width in the middle; both levers
+            set(16, 0); set(13, 31); set(17, 3); set(18, 2);   // DCO 2 off, otherwise set up like DCO 1 and following the keyboard
+            set(20, 63);                                // mix: DCO 1 only
+            set(21, 127); set(24, 0);                   // filter open, no resonance
+            set(27, 63); set(29, 63);                   // both amplifiers
+            for(uint8_t env = 50; env <= 70; env += 10)
+            {
+                set(static_cast<uint8_t>(env + 3), 63); // sustain
+                set(static_cast<uint8_t>(env + 5), 63); // amplitude
+            }
+            set(33, patch::SourceKeyboard);
+            constexpr int points[5] = {0, 15, 31, 47, 63};
+            for(uint8_t i = 0; i < 5; ++i)
+                set(static_cast<uint8_t>(34 + i), points[i]);
+            set(80, 40); set(84, 63); set(88, patch::SourceKeyboard);   // LFO 1
+            set(90, 30); set(94, 63); set(98, patch::SourceKeyboard);   // LFO 2
+            return d;
+        }
+
+        // A bank file as its SysEx messages, in file order.
+        std::vector<std::vector<uint8_t>> readSysexMessages(const juce::File& file)
+        {
+            std::vector<std::vector<uint8_t>> messages;
+            juce::MemoryBlock raw;
+            if(!file.existsAsFile() || !file.loadFileAsData(raw))
+                return messages;
+            const auto* bytes = static_cast<const uint8_t*>(raw.getData());
+            size_t start = raw.getSize();
+            for(size_t i = 0; i < raw.getSize(); ++i)
+            {
+                if(bytes[i] == 0xf0)
+                    start = i;
+                else if(bytes[i] == 0xf7 && start < i)
+                {
+                    messages.emplace_back(bytes + start, bytes + i + 1);
+                    start = raw.getSize();
+                }
+            }
+            return messages;
+        }
+
+        // Where the single patches are among the messages of a bank file.
+        std::vector<size_t> patchPositions(const std::vector<std::vector<uint8_t>>& messages)
+        {
+            std::vector<size_t> at;
+            for(size_t i = 0; i < messages.size(); ++i)
+                if(matrixLib::patch::isSinglePatch(messages[i]))
+                    at.push_back(i);
+            return at;
+        }
+
+        // The RAM bank holds 200 patches as two banks of 100, each behind its Set Bank message.
+        void completeRamBank(std::vector<std::vector<uint8_t>>& messages)
+        {
+            using namespace matrixLib;
+            auto count = patchPositions(messages).size();
+            const auto init = matrixInitPatch();
+            while(count < static_cast<size_t>(HeadlessProcessor::kMatrixRamSlots))
+            {
+                if(count % 100 == 0)
+                    messages.push_back({0xf0, patch::IdOberheim, patch::IdMatrix, patch::OpSetBank, static_cast<uint8_t>(count / 100), 0xf7});
+                messages.push_back(patch::encode(init, patch::OpSinglePatch, static_cast<uint8_t>(count % 100)));
+                ++count;
+            }
+        }
+
+        bool writeSysexMessages(const juce::File& file, const std::vector<std::vector<uint8_t>>& messages)
+        {
+            juce::MemoryBlock out;
+            for(const auto& m : messages)
+                out.append(m.data(), m.size());
+            file.getParentDirectory().createDirectory();
+            return file.replaceWithData(out.getData(), out.getSize());
+        }
+    }
+
+    std::string HeadlessProcessor::getMatrixRamBankPath()
+    {
+        return juce::File(getSynthDataFolder(SynthType::Matrix)).getChildFile(kMatrixRamBankFile).getFullPathName().toStdString();
+    }
+
+    std::vector<std::string> HeadlessProcessor::getMatrixWritableBanks()
+    {
+        const juce::File ram(getMatrixRamBankPath());
+        juce::Array<juce::File> files;
+        juce::File(getSynthDataFolder(SynthType::Matrix)).findChildFiles(files, juce::File::findFiles, false, "*.syx");
+        files.sort();
+
+        std::vector<std::string> banks{ram.getFullPathName().toStdString()};
+        for(const auto& f : files)
+            if(f != ram && !f.getFileName().startsWith(kMatrixRomBankStart))
+                banks.push_back(f.getFullPathName().toStdString());
+        return banks;
+    }
+
+    std::vector<std::string> HeadlessProcessor::getMatrixBankPatchNames(const std::string& bankPath)
+    {
+        const juce::File file(bankPath);
+        auto messages = readSysexMessages(file);
+        if(file == juce::File(getMatrixRamBankPath()))
+            completeRamBank(messages);
+
+        std::vector<std::string> names;
+        for(const auto at : patchPositions(messages))
+            names.push_back(extractPatchName(SynthType::Matrix, messages[at]));
+        return names;
+    }
+
+    bool HeadlessProcessor::getMatrixEditedPatch(uint8_t* data) const
+    {
+        if(m_synthType != SynthType::Matrix || !m_paramPool)
+            return false;
+        const int raw = m_currentProgram * m_bankStride;
+        if(raw < 0 || raw >= static_cast<int>(m_bankMessages.size()))
+            return false;
+        const auto loaded = matrixLib::patch::decode(m_bankMessages[static_cast<size_t>(raw)]);
+        if(!loaded)
+            return false;
+        std::copy(loaded->begin(), loaded->end(), data);
+        m_paramPool->writeMatrixPatch(data);
+        return true;
+    }
+
+    bool HeadlessProcessor::hasMatrixPatchEdits() const
+    {
+        return m_synthType == SynthType::Matrix && m_paramPool && m_paramPool->hasPatchEdits();
+    }
+
+    bool HeadlessProcessor::saveMatrixPatch(const std::string& bankPath, const int slot, const std::string& name)
+    {
+        matrixLib::patch::Data data{};
+        if(slot < 0 || !getMatrixEditedPatch(data.data()))
+            return false;
+        matrixLib::patch::setName(data, name);
+
+        const juce::File file(bankPath);
+        const bool ram = file == juce::File(getMatrixRamBankPath());
+        auto messages = readSysexMessages(file);
+        if(ram)
+            completeRamBank(messages);
+        const auto at = patchPositions(messages);
+        if(static_cast<size_t>(slot) >= at.size())
+            return false;
+
+        // the RAM bank as it was before the editor first changed it
+        if(ram && file.existsAsFile())
+        {
+            const auto backup = file.getParentDirectory().getChildFile("Backup").getChildFile(file.getFileName());
+            if(!backup.existsAsFile())
+            {
+                backup.getParentDirectory().createDirectory();
+                if(!file.copyFileTo(backup))
+                    return false;
+            }
+        }
+
+        auto& target = messages[at[static_cast<size_t>(slot)]];
+        target = matrixLib::patch::encode(data, matrixLib::patch::OpSinglePatch, target[4]);
+        if(!writeSysexMessages(file, messages))
+            return false;
+
+        // The saved patch is now the loaded program, so its edits are no longer edits.
+        return loadPresetFromFile(file.getFullPathName().toStdString(), file.getFileNameWithoutExtension().toStdString(), slot);
+    }
+
+    std::string HeadlessProcessor::createMatrixBank(const std::string& bankName, const std::string& patchName)
+    {
+        const auto legal = juce::File::createLegalFileName(juce::String(bankName).trim());
+        if(legal.isEmpty())
+            return "Enter a name for the bank.";
+        if(legal.startsWithIgnoreCase(juce::String(kMatrixRomBankStart).trim()))
+            return "That name is taken by the ROM banks.";
+
+        const auto file = juce::File(getSynthDataFolder(SynthType::Matrix)).getChildFile(legal + ".syx");
+        if(file.exists())
+            return "A bank with this name already exists.";
+
+        matrixLib::patch::Data data{};
+        if(!getMatrixEditedPatch(data.data()))
+            return "There is no patch to save.";
+        matrixLib::patch::setName(data, patchName);
+
+        std::vector<std::vector<uint8_t>> messages;
+        const auto init = matrixInitPatch();
+        for(int slot = 0; slot < kMatrixBankSlots; ++slot)
+            messages.push_back(matrixLib::patch::encode(slot == 0 ? data : init, matrixLib::patch::OpSinglePatch, static_cast<uint8_t>(slot)));
+        if(!writeSysexMessages(file, messages))
+            return "The bank file could not be written.";
+
+        if(!loadPresetFromFile(file.getFullPathName().toStdString(), file.getFileNameWithoutExtension().toStdString(), 0))
+            return "The bank was written but could not be loaded.";
+        return {};
+    }
+
+    bool HeadlessProcessor::initMatrixPatch()
+    {
+        if(m_synthType != SynthType::Matrix || !m_paramPool || m_currentProgram < 0 || m_currentProgram >= getProgramCount())
+            return false;
+        const auto init = matrixInitPatch();
+        m_paramPool->adoptMatrixPatch(init.data());
+        m_matrixInitPatch = true;
+        // goes out as the loaded program with every parameter edited
+        sendBankMessage(m_currentProgram);
+        return true;
+    }
+
+    bool HeadlessProcessor::refreshMatrixBankFromDisk()
+    {
+        if(m_synthType != SynthType::Matrix || m_isBooting.load() || !m_paramPool
+           || m_sysexFilePath.empty() || m_bankMessages.empty())
+            return false;
+
+        const juce::File file(m_sysexFilePath);
+        if(!file.existsAsFile())
+            return false;
+        const auto stamp = file.getLastModificationTime().toMilliseconds();
+        const auto size  = file.getSize();
+        if(stamp == m_bankFileStamp && size == m_bankFileSize)
+            return false;
+
+        juce::MemoryBlock raw;
+        if(!file.loadFileAsData(raw))
+            return false;
+        m_bankFileStamp = stamp;
+        m_bankFileSize  = size;
+        if(raw.getSize() == m_sysexData.size() && std::memcmp(raw.getData(), m_sysexData.data(), raw.getSize()) == 0)
+            return false;
+
+        const auto* bytes = static_cast<const uint8_t*>(raw.getData());
+        std::vector<uint8_t> data(bytes, bytes + raw.getSize());
+        synthLib::SysexBufferList messages;
+        synthLib::MidiToSysex::extractSysexFromData(messages, synthLib::SysexBuffer(data.begin(), data.end()));
+        synthLib::SysexBufferList patches;
+        for(const auto& msg : messages)
+            if(matrixLib::patch::isSinglePatch(msg.data(), msg.size()))
+                patches.push_back(msg);
+        // a file caught half written, or one that no longer reaches the loaded position
+        if(patches.empty() || m_currentProgram < 0 || m_currentProgram >= static_cast<int>(patches.size()))
+            return false;
+
+        // what plays now, edits included
+        matrixLib::patch::Data playing{};
+        const bool sounding = getMatrixEditedPatch(playing.data());
+
+        m_bankMessages = std::move(patches);
+        m_sysexData    = std::move(data);
+        m_bankStride   = 1;
+        m_programNames.resize(m_bankMessages.size());
+        for(size_t i = 0; i < m_bankMessages.size(); ++i)
+            m_programNames[i] = extractPatchName(m_synthType, m_bankMessages[i]);
+        m_patchName = m_programNames[static_cast<size_t>(m_currentProgram)];
+        ++m_bankGeneration;
+
+        if(sounding)
+        {
+            // The name is not part of the sound. Where the parameters are those of the file
+            // nothing is an edit any more; otherwise all of what plays is.
+            const auto fresh = matrixLib::patch::decode(m_bankMessages[static_cast<size_t>(m_currentProgram)]);
+            const bool same = fresh && std::equal(playing.begin() + matrixLib::patch::NameLength, playing.end(),
+                                                  fresh->begin() + matrixLib::patch::NameLength);
+            if(same)
+            {
+                m_paramPool->clearTouched();
+                m_matrixInitPatch = false;
+            }
+            else
+                m_paramPool->adoptMatrixPatch(playing.data());
+        }
+
+        updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
+                              .withNonParameterStateChanged(true)
+                              .withProgramChanged(true));
+        return true;
+    }
+
+    void HeadlessProcessor::applyMidiProgramChange()
+    {
+        const int program = m_midiProgramChange.exchange(-1);
+        if(program < 0 || m_synthType != SynthType::Matrix || m_isBooting.load())
+            return;
+        // The position of the loaded bank with that number, as picking it from the panel does.
+        // A number the bank does not have is ignored.
+        if(program < getProgramCount())
+            selectProgram(program);
+    }
+
     bool HeadlessProcessor::hasMatrixHostTempo() const
     {
         const auto* dev = getMatrixDevice();
@@ -3838,6 +4241,33 @@ namespace retromulator
             processDemoSequence(static_cast<uint32_t>(buffer.getNumSamples()), getSampleRate());
             processMidiFile(static_cast<uint32_t>(buffer.getNumSamples()), getSampleRate());
         }
+        if(m_synthType == SynthType::Matrix)
+        {
+            // A program change selects a position of the loaded bank, on the message thread.
+            // Passed on, the firmware would load from its own memory instead: the sound
+            // changes and the panel still shows the patch it had.
+            int program = -1;
+            for(const auto meta : midi)
+            {
+                const auto m = meta.getMessage();
+                if(m.isProgramChange())
+                    program = m.getProgramChangeNumber();
+            }
+            if(program >= 0)
+            {
+                juce::MidiBuffer kept;
+                for(const auto meta : midi)
+                {
+                    const auto m = meta.getMessage();
+                    if(!m.isProgramChange())
+                        kept.addEvent(m, meta.samplePosition);
+                }
+                midi.swapWith(kept);
+                m_midiProgramChange.store(program);
+                if(m_programRelay)
+                    m_programRelay->triggerAsyncUpdate();
+            }
+        }
         // Runs for every core, and from the audio path rather than a host callback that
         // only fires when a playhead offers a BPM.
         processDeferredResend();
@@ -3953,6 +4383,8 @@ namespace retromulator
     // "TRKO": tracker options, a bit field. 1 = stop at end, 2 = shuffle.
     static constexpr int32_t kTrackerOptionsMagic = 0x4F4B5254;
     static constexpr int32_t kMatrixLfoSyncMagic = 0x534C584D;   // 'MXLS'
+    // 'MXED': the patch editor, a bit field. 1 = open, 2 = the sound is the initialised patch.
+    static constexpr int32_t kMatrixEditorMagic = 0x4445584D;
     // "E88D": the board. Written last, and read back from the tail before the device is
     // created, so the boot picks the right one without parsing the blocks in between.
     static constexpr int32_t kEmu88BoardMagic = 0x44383845;
@@ -4032,6 +4464,13 @@ namespace retromulator
         appendInt32(destData, static_cast<int32_t>(slotBytes.size() / 2));
         if(!slotBytes.empty())
             destData.append(slotBytes.data(), slotBytes.size());
+
+        // ['MXED':int32][flags:int32]
+        if(m_synthType == SynthType::Matrix)
+        {
+            appendInt32(destData, kMatrixEditorMagic);
+            appendInt32(destData, (m_editPanelOpen ? 1 : 0) | (isMatrixInitPatch() ? 2 : 0));
+        }
 
         // 88emu per-part programs and the edited part:
         // ['E88P':int32][count:int32][program:int32 * count][part:int32]
@@ -4276,6 +4715,14 @@ namespace retromulator
             // Restore the saved file path so navigatePatch can find the file in
             // the bank list for cross-bank navigation after a project reload.
             m_sysexFilePath = sysexFilePath;
+            // A project saved before the product or its bank folder was renamed names a
+            // file that has moved with the folder: look for it where the banks are now.
+            if(newType == SynthType::Matrix && !sysexFilePath.empty() && !juce::File(sysexFilePath).existsAsFile())
+            {
+                const auto moved = juce::File(getSynthDataFolder(newType)).getChildFile(juce::File(sysexFilePath).getFileName());
+                if(moved.existsAsFile())
+                    m_sysexFilePath = moved.getFullPathName().toStdString();
+            }
         }
 
         // Restore OpenWurli device state blob (optional, backwards compatible)
@@ -4366,6 +4813,10 @@ namespace retromulator
                 for(int32_t i = 0; i < count; ++i)
                     values.emplace_back(bytes[offset + i * 2], bytes[offset + i * 2 + 1]);
                 m_paramPool->restoreValues(values);
+                // Matrix patch edits go out with the patch, see sendBankMessage
+                if(newType == SynthType::Matrix && m_paramPool->hasPatchEdits()
+                   && m_currentProgram >= 0 && m_currentProgram < getProgramCount())
+                    sendBankMessage(m_currentProgram);
             }
             offset += count * 2;
         }
@@ -4374,6 +4825,26 @@ namespace retromulator
             // Not a params block (older state): rewind so the next block still parses.
             offset = paramsStart;
         }
+
+        // The patch editor (optional: absent in states written before it was saved).
+        const int editorStart = offset;
+        int32_t editorMagic = 0, editorFlags = 0;
+        if(newType == SynthType::Matrix
+           && readInt32(bytes, sizeInBytes, offset, editorMagic) && editorMagic == kMatrixEditorMagic
+           && readInt32(bytes, sizeInBytes, offset, editorFlags))
+        {
+            m_editPanelOpen   = (editorFlags & 1) != 0;
+            m_matrixInitPatch = (editorFlags & 2) != 0;
+        }
+        else
+        {
+            offset = editorStart;
+        }
+
+        // The state carries the bank as it was when it was saved. Its file is what the
+        // panel saves into and what other instances read, so the file has the say.
+        if(newType == SynthType::Matrix)
+            refreshMatrixBankFromDisk();
 
         // Restore the 88emu per-part programs and the edited part (optional).
         int restorePart = -1;

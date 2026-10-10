@@ -44,21 +44,21 @@ namespace retromulator
     static std::string getRomSearchPath()
     {
 #if defined(_WIN32)
-        // Windows: Documents/discoDSP/Retromulator/
+        // Windows: Documents/GPR Music Project/MTRX-1K/
         const char* docs = std::getenv("USERPROFILE");
         if(!docs) docs = std::getenv("HOMEDRIVE");
         if(docs)
-            return std::string(docs) + "\\Documents\\discoDSP\\Retromulator\\";
+            return std::string(docs) + "\\Documents\\GPR Music Project\\MTRX-1K\\";
 #elif defined(__APPLE__)
-        // macOS: ~/Library/Application Support/discoDSP/Retromulator/
+        // macOS: ~/Library/Application Support/GPR Music Project/MTRX-1K/
         const char* home = std::getenv("HOME");
         if(home)
-            return std::string(home) + "/Library/Application Support/discoDSP/Retromulator/";
+            return std::string(home) + "/Library/Application Support/GPR Music Project/MTRX-1K/";
 #else
-        // Linux: ~/Documents/discoDSP/Retromulator/
+        // Linux: ~/Documents/GPR Music Project/MTRX-1K/
         const char* home = std::getenv("HOME");
         if(home)
-            return std::string(home) + "/Documents/discoDSP/Retromulator/";
+            return std::string(home) + "/Documents/GPR Music Project/MTRX-1K/";
 #endif
         return {};
     }
@@ -212,13 +212,13 @@ namespace retromulator
                         "Matrix-1000 firmware not found. Place the 32 KB system EPROM .bin (and the 64 KB patch EPROM .bin) in the search path.");
 
                 // system EPROM, then the patch EPROM when present; the device keeps its
-                // calibration snapshot and the ROM bank files in the Matrix data folder
+                // calibration snapshot and the ROM bank files in the folder of the bank files
                 synthLib::DeviceCreateParams p;
                 p.romData = rom.firmware;
                 p.romData.insert(p.romData.end(), rom.patchRom.begin(), rom.patchRom.end());
                 p.romName = rom.firmwareFile;
                 if(!romSearchPath().empty())
-                    p.homePath = romSearchPath() + synthTypeName(SynthType::Matrix) + "/";
+                    p.homePath = romSearchPath() + synthFolderName(SynthType::Matrix) + "/";
                 return new matrixLib::Device(p);
             }
 

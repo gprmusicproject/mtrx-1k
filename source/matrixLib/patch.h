@@ -18,11 +18,21 @@ namespace matrixLib
 		constexpr uint8_t OpRequest = 0x04;              // F0 10 06 04 type nn F7
 		constexpr uint8_t OpParameter = 0x06;            // F0 10 06 06 pp vv F7, remote parameter edit
 		constexpr uint8_t OpSetBank = 0x0a;              // F0 10 06 0A bb F7
+		constexpr uint8_t OpMatrixParameter = 0x0b;      // F0 10 06 0B bus source amount destination F7, remote edit of a modulation bus
 		constexpr uint8_t OpEditBuffer = 0x0d;           // F0 10 06 0D 00 <data> cs F7
 
 		constexpr size_t DataSize = 134;
 		constexpr size_t SysexSize = 5 + DataSize * 2 + 2;   // 275
 		constexpr size_t NameLength = 8;
+
+		// ten modulation matrix entries close the patch: source, amount, destination
+		constexpr size_t MatrixOffset = 104;
+		constexpr size_t MatrixBusCount = 10;
+		constexpr uint8_t SourceCount = 21;
+		constexpr uint8_t DestinationCount = 33;
+		constexpr uint8_t SourceKeyboard = 9;
+		constexpr uint8_t SourceTracking = 11;
+		constexpr uint8_t DestVcfFrequency = 9;
 
 		using Data = std::array<uint8_t, DataSize>;
 
@@ -63,5 +73,6 @@ namespace matrixLib
 		// value as the patch stores it (signed parameters are two's complement bytes)
 		int getParamValue(const Data& _data, const Param& _param);
 		std::vector<uint8_t> createParamChange(uint8_t _number, int _value);
+		std::vector<uint8_t> createMatrixChange(uint8_t _bus, uint8_t _source, int _amount, uint8_t _destination);
 	}
 }

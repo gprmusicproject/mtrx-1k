@@ -1,7 +1,13 @@
 #pragma once
 
 #include "HeadlessProcessor.h"
+#include "RackPanel.h"
+#include "EditPanel.h"
 #include <juce_gui_basics/juce_gui_basics.h>
+
+#include <array>
+#include <memory>
+#include <vector>
 
 namespace retromulator
 {
@@ -10,7 +16,7 @@ namespace retromulator
     {
     public:
         explicit BasicEditor(HeadlessProcessor& p);
-        ~BasicEditor() override { stopTimer(); }
+        ~BasicEditor() override { stopTimer(); setLookAndFeel(nullptr); }
 
         void paint(juce::Graphics& g) override;
         void resized() override;
@@ -18,12 +24,50 @@ namespace retromulator
     private:
         HeadlessProcessor& m_proc;
 
-        juce::ComboBox m_synthCombo;
+        // Declared before the components that use it so it outlives them.
+        RackLookAndFeel m_lookAndFeel;
+
         juce::TextButton m_prevBtn  { "<" };
         juce::TextButton m_nextBtn  { ">" };
         juce::ComboBox m_progCombo;
         juce::ComboBox m_bankCombo;
         juce::Label    m_statusLabel;
+
+        // ── Rack panel ───────────────────────────────────────────────────────
+        // What the display shows and what the keypad and +/- act on.
+        enum class PanelMode { Patch, Bank };
+
+        juce::Image         m_background;
+        VolumeKnob          m_volume;
+        PanelButton         m_selectBtn;
+        PanelButton         m_bankLockBtn;
+        PanelButton         m_enterBtn;
+        PanelButton         m_plusBtn  { "+" };
+        PanelButton         m_minusBtn { juce::CharPointer_UTF8("\xe2\x88\x92") };
+        std::array<std::unique_ptr<PanelButton>, 10> m_digitBtns;
+        SevenSegmentDisplay m_display;
+        PowerSwitch         m_power;
+        ThemeSwitch         m_themeSwitch;
+        LegendButton        m_aboutBtn { "About" };
+        AboutPanel          m_about;
+        // Opens the patch editor under the panel.
+        juce::TextButton    m_editBtn { "Edit" };
+        EditPanel           m_editPanel;
+        rackPanel::Theme    m_theme = rackPanel::Theme::Black;
+
+        PanelMode    m_mode = PanelMode::Patch;
+        // While locked, +/- stop at the ends of the loaded bank instead of moving to the next one.
+        bool         m_bankLock = false;
+        juce::String m_entry;            // digits typed so far
+        int          m_entryTicks = 0;   // timer ticks until a half-typed number is dropped
+        juce::String m_flash;            // short message that overrides the display
+        int          m_flashTicks = 0;
+        int          m_statusTicks = 0;
+        // Core the power switch brings back.
+        SynthType    m_powerOffType = SynthType::None;
+        // A core was asked for and its firmware was not found; it has been unloaded since.
+        bool         m_firmwareMissingLatch = false;
+        std::array<bool, rackPanel::kLedCount> m_leds{};
 
         static constexpr int kImportId         = 9999;
         static constexpr int kExportPresetId   = 9998;
@@ -38,6 +82,7 @@ namespace retromulator
         static constexpr int kMatrixLfoDivFirst = 9820;
 
         juce::String m_lastSysexPath;
+        uint32_t     m_lastBankGeneration = 0;
         juce::String m_lastBankFolder;
         SynthType    m_lastSynthType = SynthType::None;
         juce::String m_currentBankFolder;
@@ -56,11 +101,36 @@ namespace retromulator
         void updateMatrixLfoSyncItems();
         void navigatePatch(int delta);
         void navigateBankFolder(int delta);
-        void onSynthTypeChanged();
+        // Boots a core in the background, or switches the unit off with SynthType::None.
+        void startCore(SynthType type);
+        void onCoreStarted(SynthType type);
         void onFirmwareMissing(SynthType type);
-        void applyLoadedRom(SynthType type, const juce::String& romFolder);
+        void setTheme(rackPanel::Theme theme);
+        void setEditOpen(bool open);
 
-        void timerCallback() override { updateStatus(); }
+        void refreshPanel();
+        void onPanelDigit(int digit);
+        void onPanelStep(int delta);
+        void commitPanelEntry();
+        void flashPanel(const juce::String& text);
+        void selectPatchNumber(int number);
+        // Number shown for a program of the loaded bank: 001 upward as in the patch list,
+        // or the hardware's 000-999 on the Matrix, where the hundreds digit is the bank.
+        int  patchDisplayNumber(int index) const;
+        int  matrixBankBase() const;
+        // Bank combo entry for a Matrix bank digit, or 0: 2-9 are the ROM bank files,
+        // 0 and 1 the first bank that is not one of them.
+        int  matrixBankItemId(int bank) const;
+        // Digits a patch number takes on the keypad.
+        int  patchEntryLength() const;
+        // Bank combo entries that load something, leaving out its menu commands.
+        std::vector<int> bankItemIds() const;
+        int  currentBankNumber() const;
+        void selectBankNumber(int number);
+        void stepBank(int delta);
+        void onPowerSwitch();
+
+        void timerCallback() override;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(BasicEditor)
     };

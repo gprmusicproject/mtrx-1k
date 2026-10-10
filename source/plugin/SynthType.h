@@ -70,4 +70,10 @@ namespace retromulator
             default:                   return "None";
         }
     }
+
+    // Name of the folder under the data folder that holds a core's bank files.
+    inline const char* synthFolderName(SynthType t)
+    {
+        return t == SynthType::Matrix ? "Patch" : synthTypeName(t);
+    }
 }

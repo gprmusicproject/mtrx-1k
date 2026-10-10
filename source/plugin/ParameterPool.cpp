@@ -24,6 +24,20 @@ namespace retromulator
             return juce::String::formatted("slot_%03d", slot);
         }
 
+        // Matrix modulation buses in the saved slot list: three entries a bus above the real slots
+        constexpr int kMatrixBusFirstId = ParameterPool::NumSlots;
+        constexpr uint32_t kMatrixBusTouched = 1u << 24;
+
+        uint32_t packBus(const ParameterPool::MatrixBus& b)
+        {
+            return b.source | (static_cast<uint32_t>(static_cast<uint8_t>(b.amount)) << 8) | (static_cast<uint32_t>(b.destination) << 16);
+        }
+
+        ParameterPool::MatrixBus unpackBus(const uint32_t v)
+        {
+            return {static_cast<uint8_t>(v & 0xff), static_cast<int8_t>((v >> 8) & 0xff), static_cast<uint8_t>((v >> 16) & 0xff)};
+        }
+
         // Generic MIDI performance controllers. On the Virus these must stay
         // plain CC; everything else goes through the page A SysEx param change.
         bool isPerformanceCC(int cc)
@@ -370,8 +384,90 @@ namespace retromulator
 
         for(int i = 0; i < NumSlots; ++i)
             m_slots[static_cast<size_t>(i)]->rebind(&map.bindings[static_cast<size_t>(i)]);
+        for(auto& b : m_matrixBuses)
+            b.store(0, std::memory_order_relaxed);
 
         m_processor.updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withParameterInfoChanged(true));
+    }
+
+    SlotParameter* ParameterPool::findNativeSlot(const int native) const
+    {
+        if(native < 0)
+            return nullptr;
+        for(auto* s : m_slots)
+        {
+            const auto& b = s->binding();
+            if(b.desc && b.native == native)
+                return s;
+        }
+        return nullptr;
+    }
+
+    ParameterPool::MatrixBus ParameterPool::getMatrixBus(const int bus) const
+    {
+        if(bus < 0 || bus >= MatrixBusCount)
+            return {};
+        return unpackBus(m_matrixBuses[static_cast<size_t>(bus)].load(std::memory_order_relaxed));
+    }
+
+    void ParameterPool::setMatrixBus(const int bus, MatrixBus value)
+    {
+        if(bus < 0 || bus >= MatrixBusCount)
+            return;
+        value.source      = static_cast<uint8_t>(juce::jlimit(0, matrixLib::patch::SourceCount - 1, static_cast<int>(value.source)));
+        value.destination = static_cast<uint8_t>(juce::jlimit(0, matrixLib::patch::DestinationCount - 1, static_cast<int>(value.destination)));
+        value.amount      = static_cast<int8_t>(juce::jlimit(-63, 63, static_cast<int>(value.amount)));
+        m_matrixBuses[static_cast<size_t>(bus)].store(packBus(value) | kMatrixBusTouched, std::memory_order_relaxed);
+        sendMatrixBus(bus, value);
+    }
+
+    void ParameterPool::sendMatrixBus(const int bus, const MatrixBus value)
+    {
+        if(m_core != SynthType::Matrix)
+            return;
+        synthLib::SMidiEvent ev(synthLib::MidiEventSource::Editor);
+        const auto msg = matrixLib::patch::createMatrixChange(static_cast<uint8_t>(bus), value.source, value.amount, value.destination);
+        ev.sysex.assign(msg.begin(), msg.end());
+        ev.a = 0xf0;
+        m_processor.addMidiEvent(ev);
+    }
+
+    bool ParameterPool::hasPatchEdits() const
+    {
+        for(const auto* s : m_slots)
+        {
+            const auto& b = s->binding();
+            if(s->isTouched() && b.desc && b.native >= 0)
+                return true;
+        }
+        for(const auto& b : m_matrixBuses)
+            if(b.load(std::memory_order_relaxed) & kMatrixBusTouched)
+                return true;
+        return false;
+    }
+
+    void ParameterPool::writeMatrixPatch(uint8_t* data) const
+    {
+        for(const auto* s : m_slots)
+        {
+            const auto& b = s->binding();
+            if(!b.desc || b.native < 0)
+                continue;
+            const auto* p = matrixLib::patch::findParam(static_cast<uint8_t>(b.native));
+            if(!p)
+                continue;
+            const int v = juce::jlimit(static_cast<int>(p->min), static_cast<int>(p->max),
+                                       b.desc->isBipolar ? s->getMidiValue() + p->min : s->getMidiValue());
+            data[p->byte] = p->min < 0 ? static_cast<uint8_t>(static_cast<int8_t>(v)) : static_cast<uint8_t>(v);
+        }
+        for(int bus = 0; bus < MatrixBusCount; ++bus)
+        {
+            const auto v = getMatrixBus(bus);
+            auto* d = data + matrixLib::patch::MatrixOffset + static_cast<size_t>(bus) * 3;
+            d[0] = v.source;
+            d[1] = static_cast<uint8_t>(v.amount);
+            d[2] = v.destination;
+        }
     }
 
     bool ParameterPool::handleIncomingCC(const synthLib::SMidiEvent& ev)
@@ -670,20 +766,51 @@ namespace retromulator
         }
     }
 
+    void ParameterPool::adoptMatrixPatch(const uint8_t* data)
+    {
+        matrixLib::patch::Data patch;
+        std::copy(data, data + patch.size(), patch.begin());
+
+        m_mirroring.store(true, std::memory_order_release);
+        for(auto* s : m_slots)
+        {
+            const auto& b = s->binding();
+            if(!b.desc || b.native < 0)
+                continue;
+            if(const auto* p = matrixLib::patch::findParam(static_cast<uint8_t>(b.native)))
+            {
+                const int v = matrixLib::patch::getParamValue(patch, *p);
+                s->setFromMidi(b.desc->isBipolar ? v - p->min : v, true);
+            }
+        }
+        m_mirroring.store(false, std::memory_order_release);
+
+        for(int bus = 0; bus < MatrixBusCount; ++bus)
+        {
+            const auto* d = data + matrixLib::patch::MatrixOffset + static_cast<size_t>(bus) * 3;
+            m_matrixBuses[static_cast<size_t>(bus)].store(packBus({d[0], static_cast<int8_t>(d[1]), d[2]}) | kMatrixBusTouched,
+                                                          std::memory_order_relaxed);
+        }
+    }
+
     void ParameterPool::clearTouched()
     {
         for(auto* s : m_slots)
             s->clearTouched();
+        for(auto& b : m_matrixBuses)
+            b.fetch_and(~kMatrixBusTouched, std::memory_order_relaxed);
     }
 
     void ParameterPool::resendTouched()
     {
+        // The Matrix patch that was just sent already carries its parameter and bus edits.
+        const bool matrix = m_core == SynthType::Matrix;
         for(auto* s : m_slots)
         {
             if(!s->isTouched())
                 continue;
             const auto& b = s->binding();
-            if(b.desc)
+            if(b.desc && !(matrix && b.native >= 0))
                 sendSlot(*s, b, s->getMidiValue());
         }
     }
@@ -696,6 +823,17 @@ namespace retromulator
             if(s->isTouched() && s->binding().desc)
                 out.emplace_back(static_cast<uint8_t>(s->getSlot()),
                                  static_cast<uint8_t>(juce::jlimit(0, 127, s->getMidiValue())));
+        }
+        for(int bus = 0; bus < MatrixBusCount; ++bus)
+        {
+            const auto v = m_matrixBuses[static_cast<size_t>(bus)].load(std::memory_order_relaxed);
+            if(!(v & kMatrixBusTouched))
+                continue;
+            const auto b = unpackBus(v);
+            const auto id = static_cast<uint8_t>(kMatrixBusFirstId + bus * 3);
+            out.emplace_back(id, b.source);
+            out.emplace_back(static_cast<uint8_t>(id + 1), static_cast<uint8_t>(b.amount + 63));
+            out.emplace_back(static_cast<uint8_t>(id + 2), b.destination);
         }
         return out;
     }
@@ -783,6 +921,15 @@ namespace retromulator
                         values[i] = b.desc->isBipolar ? v - p->min : v;
                     }
                 }
+                // the buses follow the patch like the slots: an edited one keeps its edit
+                for(int bus = 0; bus < MatrixBusCount; ++bus)
+                {
+                    auto& held = m_matrixBuses[static_cast<size_t>(bus)];
+                    if(held.load(std::memory_order_relaxed) & kMatrixBusTouched)
+                        continue;
+                    const auto* d = data->data() + matrixLib::patch::MatrixOffset + static_cast<size_t>(bus) * 3;
+                    held.store(packBus({d[0], static_cast<int8_t>(d[1]), d[2]}), std::memory_order_relaxed);
+                }
                 continue;
             }
 
@@ -840,6 +987,29 @@ namespace retromulator
 
     void ParameterPool::restoreValues(const std::vector<std::pair<uint8_t, uint8_t>>& values)
     {
+        // Matrix modulation buses first: three entries each, gathered before the bus is sent
+        std::array<bool, MatrixBusCount> busSeen{};
+        std::array<MatrixBus, MatrixBusCount> buses;
+        for(int bus = 0; bus < MatrixBusCount; ++bus)
+            buses[static_cast<size_t>(bus)] = getMatrixBus(bus);
+        for(const auto& [slot, value] : values)
+        {
+            const int field = static_cast<int>(slot) - kMatrixBusFirstId;
+            if(field < 0 || field >= MatrixBusCount * 3)
+                continue;
+            auto& b = buses[static_cast<size_t>(field / 3)];
+            busSeen[static_cast<size_t>(field / 3)] = true;
+            if(field % 3 == 0)      b.source = value;
+            else if(field % 3 == 1) b.amount = static_cast<int8_t>(static_cast<int>(value) - 63);
+            else                    b.destination = value;
+        }
+        // Matrix patch edits are not sent from here: the caller sends the edited patch whole.
+        const bool matrix = m_core == SynthType::Matrix;
+        for(int bus = 0; bus < MatrixBusCount; ++bus)
+            if(busSeen[static_cast<size_t>(bus)])
+                m_matrixBuses[static_cast<size_t>(bus)].store(packBus(buses[static_cast<size_t>(bus)]) | kMatrixBusTouched,
+                                                              std::memory_order_relaxed);
+
         for(const auto& [slot, value] : values)
         {
             if(slot >= NumSlots)
@@ -847,7 +1017,7 @@ namespace retromulator
             auto* s = m_slots[slot];
             s->setFromMidi(value, false);
             const auto& b = s->binding();
-            if(b.desc)
+            if(b.desc && !(matrix && b.native >= 0))
                 sendSlot(*s, b, value);
         }
     }
