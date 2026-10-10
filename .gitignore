@@ -13,3 +13,18 @@ DerivedData/
 
 # macOS
 .DS_Store
+
+# JUCE comes as a submodule
+!Modules/JUCE
+
+# Local material that is not part of the source: manuals and datasheets, screenshots,
+# build logs, test plans, firmware and calibration
+/*.pdf
+/*.log
+/*.xlsx
+/Coffeeshopped.jpg
+/m1000_manager_win7.png
+/maxforlive.png
+mtrx1kv*.bin
+M1000-IC_*.BIN
+*.nvram
