@@ -1,58 +1,74 @@
-# Retromulator
+# MTRX-1K
 
-A standalone app and DAW plugin (AAX / VST3 / AU) that emulates classic hardware synthesizers, samplers, and keyboards by running their original firmware on cycle-accurate CPU and DSP emulators.
+A VST3 instrument and standalone app for Windows that plays and edits the sounds of a classic six-voice analogue synthesizer module of 1987, the Oberheim Matrix-1000, by running its original firmware on an emulated processor board that drives six models of its voice chip.
 
-[![Retromulator](https://www.discodsp.com/img/retromulator.webp)](https://www.discodsp.com/retromulator/)
+MTRX-1K is made by **GPR Music Project**. It is a modified version of [Retromulator](https://github.com/reales/retromulator) by discoDSP, reduced to its Matrix-1000 core and extended with a patch editor. It is free software under the GNU General Public License v3.
 
-[![Download for Windows](https://img.shields.io/badge/Windows-Download-blue?style=for-the-badge&logo=windows)](https://www.discodsp.com/download/?id=36) &nbsp; [![Download for macOS](https://img.shields.io/badge/macOS-Download-blue?style=for-the-badge&logo=apple)](https://www.discodsp.com/download/?id=35) &nbsp; [![Download for Linux](https://img.shields.io/badge/Linux-Download-blue?style=for-the-badge&logo=linux&logoColor=white)](https://www.discodsp.com/download/?id=34) &nbsp; [![Buy License $29](https://img.shields.io/badge/Buy_License-$29-green?style=for-the-badge&logo=fastly)](https://discodsp.onfastspring.com/retromulator/)
+MTRX-1K is not affiliated with, endorsed by or connected to Oberheim. Oberheim and Matrix-1000 are trademarks of their owners and are named here only to say what the software emulates.
 
-## Hardware Cores
+## What it does
 
-| Hardware | Emulation |
-|---|---|
-| Access Virus A / B / C | Motorola DSP 56300 cycle-accurate |
-| Access Virus TI | Motorola DSP 56300 cycle-accurate |
-| Akai S1000 | SFZero v3.0.0 sample engine |
-| Clavia Nord Lead / Rack 2x | Motorola DSP 56300 cycle-accurate |
-| Commodore 64 SID 6581 / 8580 | reSID cycle-accurate |
-| General Instrument AY-3-8910 / Yamaha YM2149 | Ayumi + Ym2149Synth voice engine |
-| Oberheim Matrix-1000 | 6809 firmware + CEM3396 voice model |
-| Roland JP-8000 (JE-8086) | H8S CPU and 4x ESP ASIC cycle-accurate |
-| Roland SC-88 / 88VL / 88Pro / SC-8850 / SC-55mkII | H8/500 and SH-2 cycle-accurate |
-| Tracker modules (XM / MOD / S3M / IT) | Fasttracker 2 and Schism Tracker replayers |
-| Waldorf microQ | Motorola DSP 56300 cycle-accurate |
-| Waldorf Microwave XT | Motorola DSP 56300 cycle-accurate |
-| Wurlitzer 200A (OpenWurli) | Physical modeling synthesis |
-| Yamaha DX7 | HD6303R + YM21280 EGS + YM21290 OPS (VDX7) |
-| Yamaha OPL3 / YMF262 | Nuked OPL3 v1.8 |
+- Runs the original firmware (version 1.20) on an emulated 6809 board: timers, UART, sample and hold DAC, latches. The firmware calibrates the voices itself on the first start; the result is kept, so later starts are immediate.
+- Six voice models of the CEM3396 chip with band-limited oscillators, the three sync modes of the voice board, and 2x oversampling.
+- A rack panel with display, keypad, bank lock and patch selection as on the instrument, in a black or a white finish.
+- A patch editor the instrument never had: every parameter of a patch on one page, with the ten buses of the modulation matrix, envelope and tracking graphs, and the real depth of a modulation amount shown under its knob.
+- Init, Revert and Save: a patch can be written to a position of the RAM bank or to a bank of your own. The RAM bank is copied to a backup folder before its first change.
+- The 800 factory patches of banks 2 to 9 are read from the patch EPROM into bank files with their factory names.
+- Every patch parameter is a host parameter that can be automated, and is mapped to a MIDI controller.
+- Both LFOs can follow the host tempo. A cycle of the firmware's LFO lasts a whole number of steps of 26.6 ms, so a division is met within a few percent, not exactly.
+- A MIDI program change selects that position of the loaded bank.
 
-Most DSP-based synths require their original ROM firmware to run (not included). ROMs are loaded from the application support folder at runtime. The SC-88 family needs a full image set per board, kept together in its own folder and identified by content. The Matrix-1000 needs its 32 KB system EPROM, and the 64 KB patch EPROM for banks 2 to 9. The microQ can run with an embedded fallback ROM. The Akai S1000, OpenWurli, OPL3, AY-3-8910, and Tracker cores are ROM-free.
+Where the original moves a pitch or a control voltage in audible steps, about 75 times a second, MTRX-1K joins the steps. Everything else is meant to behave as the instrument does, firmware quirks included: the LFOs are one per voice, portamento glides from the note a voice played last, and the keyboard mode "Reassign Rob" does not rob a voice in firmware 1.20.
 
-The **Akai S1000** sampler loads SF2, SFZ, ZBP, and ZBB sample banks, as well as Akai ISO/BIN/CUE disk images, via the [SFZero](https://github.com/reales/retromulator/tree/main/Modules/SFZero) MIT-licensed engine with 8-point sinc interpolation, extended SFZ/SF2 opcode support, auto-slice drum mapping, CC20 global tuning, and discoDSP Bliss sampler format.
+## Status
 
-The **Wurlitzer 200A (OpenWurli)** is a physical model of the Wurlitzer 200A electric piano with 64-voice polyphony, tremolo, speaker character modeling, velocity curves, and 2x oversampling.
+Version 0.8.9, October 2026. Built and tested on Windows 11 as a VST3 in Cubase 15 and as a standalone app. The build files for other systems come from Retromulator and have not been tried with this version.
 
-The **Yamaha OPL3** emulates the YMF262 FM synthesis chip (18 channels, 4-operator) using the Nuked OPL3 engine. It loads SBI patch files with bank navigation via folder hierarchy, pitch bend, and voice stealing.
+## Firmware
 
-The **Commodore 64 SID** emulates the MOS 6581 / 8580 chip using the reSID engine with 3-voice polyphony, oldest-voice stealing, and a full 50 Hz macro playback engine (wavetable, pulsetable, filtertable, speedtable). It loads GoatTracker `.sng` banks and `.ins` standalone instruments, with live MIDI control via CC 1 (vibrato depth), CC 22 (pitch bend range, 1–48 semitones), CC 64 (sustain pedal), CC 71 (resonance), CC 74 (cutoff), and CC 75 (pulse width).
+The firmware is not included and is not part of this repository. You need your own copy of:
 
-The **AY-3-8910 / YM2149** emulates the 3-channel PSG used in the ZX Spectrum, Amstrad CPC, MSX, and Atari ST using the Ayumi engine, with a voice layer re-implementing the Ym2149Synth firmware: soft volume and pitch envelopes, glide, vibrato, detune, noise delay, and transpose. Voices are controlled via CC 1–11 and patches are stored in a user bank.
+- the 32 KB system EPROM of the instrument, firmware version 1.20;
+- the 64 KB patch EPROM, for the factory patches of banks 2 to 9 (optional).
 
-The **Tracker** core plays XM and MOD modules through the Fasttracker 2 replayer, and S3M and IT through the Schism Tracker player with Nuked OPL3 for Adlib instruments. The module owns the transport, driven by MIDI notes: play, stop, and step through a playlist, which can be shuffled or stop at its end. A song ends after five seconds of silence. Folders and .m3u playlists are expanded, the song tempo can follow the host, and a module or a whole playlist renders offline to WAV or MP3 320 with 512 tap sinc interpolation.
+Put the two `.bin` files in `Documents\GPR Music Project\MTRX-1K\ROM`. They are recognised by their size and content, not by their name. The banks are kept next to that folder, in `Documents\GPR Music Project\MTRX-1K\Patch`.
 
-The **Roland SC-88 family** emulates the SC-88, SC-88VL, SC-88Pro, SC-8850 and SC-55mkII GS sound modules, running each board's own firmware on an H8/500 or SH-2 core with the Roland tone generator, effects and filter chips. Tone and drum kit names are read from the board ROM, and the GS parameter map is exposed to the host: per-part programs, variation banks (CC0), tone maps (CC32) and the rhythm part assignment. A standard MIDI file, or a playlist of them, can be played through the board and rendered offline to WAV or MP3 320, from the plugin or from the command line.
+## Building on Windows
 
-The **Oberheim Matrix-1000** runs the original firmware on an emulated 6809 board (82C54 timers, 6850 UART, S&H DAC, latches) driving six CEM3396 voice models with BLEP oscillators and 2x oversampling. The firmware calibrates the voices itself at first boot, and the result is kept as a snapshot so later boots are instant. ROM banks 2 to 9 are dumped from the patch EPROM into .syx files with the factory names. Every patch parameter is exposed to the host and mapped to a MIDI CC, and both LFOs can follow the host tempo, MIDI clock or a SysEx tempo.
+You need Visual Studio with the C++ desktop workload and its CMake tools (CMake 3.22 or later and Ninja).
 
-The standalone app opens modules, .m3u playlists and .mid files handed over by the OS (double click, Open With, or a drop on the dock icon) and switches to the matching core.
+```
+git clone --recurse-submodules https://github.com/gprmusicproject/mtrx-1k
+cd mtrx-1k
+build_win.bat
+```
 
-## How it differs from Gearmulator
+JUCE 8.0.15 comes as a submodule in `Modules/JUCE`. The plugin and the app are written to `build\win-release\Retromulator_artefacts\Release`, as `VST3\MTRX-1K.vst3` and `Standalone\MTRX-1K.exe`. To install the plugin, copy the `MTRX-1K.vst3` folder to `C:\Program Files\Common Files\VST3` while the host is closed.
+
+## What was changed
+
+This is a modified version of Retromulator 1.8.0 (commit `c20db50` of github.com/reales/retromulator), changed by GPR Music Project in October 2026. The history of this repository shows every change. In short:
+
+- **Build**: a CMake project for Windows (`CMakeLists.txt`, `cmake/`, `build_win.bat`) next to the Projucer project of Retromulator.
+- **Product**: name, vendor and plugin identifiers of MTRX-1K; only the Matrix-1000 core is started. The other cores of Retromulator are still in the source tree and are compiled in.
+- **Interface** (`source/plugin`): the rack panel (`RackPanel`), the patch editor (`EditPanel`), saving and bank handling, the session state of the editor, automatable parameters, program change.
+- **Emulation** (`source/matrixLib`): the three sync modes after the schematic of the voice board; the timer writes with which the firmware moves a pitch; joined pitch and control voltage steps; the height of the oscillator ramp through a pitch change; the DCO click; pacing of remote parameter edits so that held notes follow a knob; portamento rate 0 in unison; the LFO rates used for the tempo sync.
+
+## The name and the symbol
+
+"GPR Music Project", "MTRX-1K" and the GPR symbol drawn on the panel identify this product and its author. The licence of the code lets you change and redistribute the code; it does not give you the right to present a changed version as coming from GPR Music Project. If you publish a modified version, give it your own name and symbol.
+
+## Where the code comes from
+
+The two parts below are taken unchanged from the README of Retromulator 1.8.0, whose code this repository contains.
+
+### How Retromulator differs from Gearmulator
 
 Retromulator is built on top of the open-source emulation engines from [Gearmulator](https://github.com/dsp56300/gearmulator) by dsp56300. Gearmulator ships as standalone applications and open-source plugins built with CMake. Retromulator packages the same engines into a polished single-plugin experience using JUCE, with a unified rack-style UI, DAW state persistence, bank/patch browsing, focused on preset playing.
 
 The emulation cores (dsp56300, mc68k, h8s, synthLib and all synth-specific libraries) are from Gearmulator. The DX7 emulation is ported from VDX7, a separate project (see Credits below). The OPL3 emulation uses Nuked OPL3 by Nuke.YKT. The SID emulation uses reSID by Dag Lem. The AY-3-8910 / YM2149 emulation uses Ayumi by Peter Sovietov. The JE-8086 and SC-88 family emulations are by Giulio Zausa. The Tracker core uses the Fasttracker 2 clone replayer by Olav Sorensen and the Schism Tracker player. The Akai S1000 sampler uses the SFZero module, an MIT-licensed JUCE sample engine maintained by discoDSP. The Wurlitzer 200A (OpenWurli) is a physical model fully ported by discoDSP. The Matrix-1000 emulation (6809 board and CEM3396 voice model) is by discoDSP. The synthLib device adapters that wrap each engine (SID, AY-3-8910, OpenWurli, OPL3 and Tracker), the bank and patch handling, the offline WAV / MP3 renderer and the host parameter pool are by discoDSP.
 
-## Credits
+### Credits of Retromulator
 
 - **[dsp56300](https://github.com/dsp56300)** — DSP56300 emulator, Virus TI / microQ / XT / Nord N2X engines, GPL v3
 - All contributors to [github.com/dsp56300/gearmulator](https://github.com/dsp56300/gearmulator)
@@ -75,5 +91,9 @@ The emulation cores (dsp56300, mc68k, h8s, synthLib and all synth-specific libra
 JUCE integration, UI, AAX/AU/VST3 plumbing is developed separately.
 
 ## License
+
+MTRX-1K as a whole, with the changes made by GPR Music Project, is licensed under the **GNU General Public License v3.0**, see [LICENSE.txt](LICENSE.txt). It comes with no warranty. JUCE, in `Modules/JUCE`, is used under the **GNU Affero General Public License v3.0**, see its own LICENSE.md.
+
+From the README of Retromulator, for the parts it contains ("this repository" there means Retromulator):
 
 The emulation engine source code in this repository is licensed under the **GNU General Public License v3.0** — see [LICENSE.txt](LICENSE.txt). The SFZero module is licensed under the **MIT License** — see [Modules/SFZero/LICENSE](Modules/SFZero/LICENSE). The Nuked OPL3 engine is licensed under the **GNU Lesser General Public License v2.1**. The reSID engine is licensed under the **GNU General Public License v2.0**. The Ayumi engine is licensed under the **MIT License** — see [source/ayumiLib/AYUMI_LICENSE.txt](source/ayumiLib/AYUMI_LICENSE.txt). The Fasttracker 2 replayer is licensed under the **BSD 3-Clause License** — see [source/trackerLib/ft2/LICENSE](source/trackerLib/ft2/LICENSE). The Schism Tracker player is licensed under the **GNU General Public License v2.0** — see [source/trackerLib/schism/COPYING](source/trackerLib/schism/COPYING). The libresample engine is licensed under the **BSD 3-Clause License** — see [source/libresample/LICENSE-BSD.txt](source/libresample/LICENSE-BSD.txt). The Speex resampler is licensed under the **BSD 3-Clause License**. The LAME MP3 encoder is licensed under the **GNU Lesser General Public License v2** — see [source/lameLib/COPYING](source/lameLib/COPYING).
