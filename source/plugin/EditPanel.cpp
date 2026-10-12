@@ -1,5 +1,6 @@
 #include "EditPanel.h"
 
+#include "MidiLearn.h"
 #include "ParameterPool.h"
 #include "matrixLib/patch.h"
 
@@ -30,6 +31,7 @@ namespace retromulator
         constexpr juce::uint32 kScreenTop   = 0xff1c0607;
         constexpr juce::uint32 kScreenBottom = 0xff0d0203;
         constexpr juce::uint32 kTrace       = 0xffff3324;
+        constexpr juce::uint32 kLearn       = 0xffffb020;   // what belongs to the MIDI learn
 
         const Style& styleFor(const rackPanel::Theme theme)
         {
@@ -302,6 +304,7 @@ namespace retromulator
         const Style* style;
 
         ParameterPool* pool() const { return proc.getParameterPool(); }
+        MidiLearn* learn() const { return proc.getMidiLearn(); }
     };
 
     class EditPanel::Control : public juce::Component
@@ -313,6 +316,15 @@ namespace retromulator
         virtual void rebind() {}
         // Repaints when what it shows has moved.
         virtual void refresh() = 0;
+
+        // A part of the control that a control of the player's keyboard can be assigned to:
+        // the target as the MIDI learn names it, and where it is in the control.
+        struct LearnTarget
+        {
+            int target;
+            juce::Rectangle<int> area;
+        };
+        virtual void learnTargets(std::vector<LearnTarget>&) const {}
 
     protected:
         const Style& style() const { return *ctx.style; }
@@ -340,6 +352,12 @@ namespace retromulator
                 m_param = pool ? pool->findNativeSlot(m_native) : nullptr;
                 m_shown = -1000;
                 repaint();
+            }
+
+            void learnTargets(std::vector<LearnTarget>& out) const override
+            {
+                if(usable())
+                    out.push_back({m_native, getLocalBounds()});
             }
 
             void refresh() override
@@ -715,6 +733,16 @@ namespace retromulator
                 m_destination = b;
             }
 
+            void learnTargets(std::vector<LearnTarget>& out) const override
+            {
+                if(!usable())
+                    return;
+                const int first = MidiLearn::kBusTargetFirst + m_bus * 3;
+                out.push_back({first + MidiLearn::BusSource, m_source});
+                out.push_back({first + MidiLearn::BusAmount, m_amount});
+                out.push_back({first + MidiLearn::BusDestination, m_destination});
+            }
+
             void refresh() override
             {
                 const int now = usable() ? packed() : -1;
@@ -1087,6 +1115,476 @@ namespace retromulator
         juce::String m_error;
     };
 
+    // Lies over the controls while controller assignments are learned. A click picks the
+    // parameter that the next control to move on the player's keyboard is assigned to, a
+    // right click clears what a parameter is assigned to. Every assigned parameter carries
+    // the name of its controller.
+    class EditPanel::LearnLayer final : public juce::Component
+    {
+    public:
+        explicit LearnLayer(EditPanel& panel) : m_panel(panel)
+        {
+            setTitle("MIDI learn");
+            setMouseCursor(juce::MouseCursor::PointingHandCursor);
+        }
+
+        void paint(juce::Graphics& g) override
+        {
+            const auto* learn = m_panel.m_proc.getMidiLearn();
+            if(!learn)
+                return;
+            g.fillAll(juce::Colours::black.withAlpha(0.16f));
+
+            const int armed = learn->getArmed();
+            const juce::Colour mark(kLearn);
+            forEachTarget([&](const int target, const juce::Rectangle<int> area)
+            {
+                const auto r = area.toFloat();
+                const auto* m = learn->findForTarget(target);
+                if(target == armed)
+                {
+                    g.setColour(mark.withAlpha(0.26f));
+                    g.fillRoundedRectangle(r, 4.0f);
+                    g.setColour(mark);
+                    g.drawRoundedRectangle(r.reduced(1.0f), 4.0f, 2.0f);
+                }
+                else if(m)
+                {
+                    g.setColour(mark.withAlpha(0.6f));
+                    g.drawRoundedRectangle(r.reduced(0.5f), 4.0f, 1.0f);
+                }
+                if(m)
+                {
+                    // the controller, on a tag: under a knob, in the corner of anything flat
+                    const auto text = MidiLearn::controllerName(*m, true);
+                    g.setFont(sans(8.5f, true));
+                    const float w = juce::jmin(r.getWidth(), juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), text) + 7.0f);
+                    const auto tag = r.getHeight() >= 40.0f
+                        ? juce::Rectangle<float>(r.getCentreX() - w * 0.5f, r.getBottom() - 11.0f, w, 11.0f)
+                        : juce::Rectangle<float>(r.getRight() - w, r.getY(), w, 11.0f);
+                    g.setColour(juce::Colour(0xff17120a));
+                    g.fillRoundedRectangle(tag, 2.5f);
+                    g.setColour(mark);
+                    g.drawFittedText(text, tag.toNearestInt(), juce::Justification::centred, 1, 0.7f);
+                }
+                return false;
+            });
+        }
+
+        void mouseDown(const juce::MouseEvent& e) override
+        {
+            auto* learn = m_panel.m_proc.getMidiLearn();
+            if(!learn)
+                return;
+            int hit = -1;
+            forEachTarget([&](const int target, const juce::Rectangle<int> area)
+            {
+                if(!area.contains(e.getPosition()))
+                    return false;
+                hit = target;
+                return true;
+            });
+            if(hit >= 0 && e.mods.isPopupMenu())
+                learn->removeTarget(hit);
+            else
+                learn->arm(hit);
+            m_panel.refresh();
+        }
+
+    private:
+        // every assignable part of every control with its place on this layer, until fn says stop
+        template<typename Fn> void forEachTarget(Fn&& fn) const
+        {
+            std::vector<Control::LearnTarget> targets;
+            for(const auto& c : m_panel.m_controls)
+            {
+                targets.clear();
+                c->learnTargets(targets);
+                for(const auto& t : targets)
+                    if(fn(t.target, t.area.translated(c->getX() - getX(), c->getY() - getY())))
+                        return;
+            }
+        }
+
+        EditPanel& m_panel;
+    };
+
+    // The profiles of controller assignments: choosing one, saving the assignments in use
+    // under a name, deleting one, and the list of the assignments, where one can be removed
+    // and the range of an NRPN control set. Covers the panel while it is open.
+    class EditPanel::MidiOverlay final : public juce::Component, private juce::ListBoxModel
+    {
+    public:
+        explicit MidiOverlay(HeadlessProcessor& proc) : m_proc(proc)
+        {
+            m_profile.setTitle("MIDI profile");
+            m_profile.onChange = [this] { pickProfile(); };
+            addAndMakeVisible(m_profile);
+
+            m_name.setFont(sans(14.0f, true));
+            m_name.setJustification(juce::Justification::centredLeft);
+            m_name.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff0c0d0f));
+            m_name.setColour(juce::TextEditor::textColourId, juce::Colour(0xfff0f0f0));
+            m_name.setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff34373c));
+            m_name.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(rackPanel::kLabelBlue));
+            m_name.setTitle("Profile name");
+            m_name.setInputRestrictions(40);
+            m_name.onReturnKey = [this] { saveAs(); };
+            m_name.onEscapeKey = [this] { setVisible(false); };
+            addAndMakeVisible(m_name);
+
+            m_save.onClick   = [this] { save(); };
+            m_saveAs.onClick = [this] { saveAs(); };
+            m_delete.onClick = [this] { remove(); };
+            m_close.onClick  = [this] { setVisible(false); };
+            m_clear.onClick  = [this] { clearAll(); };
+            m_import.onClick = [this] { importFile(); };
+            m_export.onClick = [this] { exportFile(); };
+            for(auto* b : {&m_save, &m_saveAs, &m_delete, &m_close, &m_clear, &m_import, &m_export})
+                addAndMakeVisible(*b);
+
+            m_list.setModel(this);
+            m_list.setRowHeight(kRow);
+            m_list.setTitle("Assignments");
+            m_list.setColour(juce::ListBox::backgroundColourId, juce::Colour(0xff0c0d0f));
+            m_list.setColour(juce::ListBox::outlineColourId, juce::Colour(0xff34373c));
+            m_list.setOutlineThickness(1);
+            addAndMakeVisible(m_list);
+        }
+
+        void open()
+        {
+            m_error.clear();
+            m_confirmDelete = m_confirmClear = false;
+            if(const auto* learn = m_proc.getMidiLearn())
+                m_name.setText(MidiLearn::isBuiltIn(learn->getProfileName()) ? juce::String() : learn->getProfileName(), false);
+            sync();
+            setVisible(true);
+            toFront(false);
+        }
+
+        // Shows what the MIDI learn holds now.
+        void sync()
+        {
+            const auto* learn = m_proc.getMidiLearn();
+            if(!learn)
+                return;
+            const auto names = learn->getProfileNames();
+            m_profile.clear(juce::dontSendNotification);
+            for(int i = 0; i < names.size(); ++i)
+                m_profile.addItem(names[i], i + 1);
+            const auto& current = learn->getProfileName();
+            if(learn->isModified())
+                m_profile.setText(current + "   (changed, not saved)", juce::dontSendNotification);
+            else
+                m_profile.setSelectedId(names.indexOf(current, true) + 1, juce::dontSendNotification);
+
+            const bool own = !MidiLearn::isBuiltIn(current);
+            m_save.setEnabled(own && learn->isModified());
+            m_delete.setEnabled(own);
+            m_clear.setEnabled(!learn->getMappings().empty());
+            m_export.setEnabled(!learn->getMappings().empty());
+            m_list.updateContent();
+            m_list.repaint();
+            repaint();
+        }
+
+        void resized() override
+        {
+            m_box = getLocalBounds().withSizeKeepingCentre(660, 470);
+            const int x = m_box.getX() + 22;
+            int y = m_box.getY() + 50;
+
+            m_profile.setBounds(x + kCaption, y, 300, 26);
+            m_import.setBounds(m_profile.getRight() + 10, y + 1, 78, 24);
+            m_export.setBounds(m_import.getRight() + 8, y + 1, 78, 24);
+            y += 36;
+            m_name.setBounds(x + kCaption, y, 220, 26);
+            m_saveAs.setBounds(m_name.getRight() + 10, y + 1, 78, 24);
+            m_save.setBounds(m_saveAs.getRight() + 8, y + 1, 64, 24);
+            m_delete.setBounds(m_save.getRight() + 8, y + 1, 78, 24);
+            y += 66;
+            m_close.setBounds(m_box.getRight() - 22 - 84, m_box.getBottom() - 18 - 24, 84, 24);
+            m_list.setBounds(x, y, m_box.getWidth() - 44, m_close.getY() - 60 - y);
+            m_clear.setBounds(m_list.getRight() - 72, m_list.getY() - 28, 72, 22);
+        }
+
+        void paint(juce::Graphics& g) override
+        {
+            g.fillAll(juce::Colours::black.withAlpha(0.62f));
+
+            const auto box = m_box.toFloat();
+            g.setGradientFill(juce::ColourGradient(juce::Colour(0xff1c1d20), 0.0f, box.getY(), juce::Colour(0xff111214), 0.0f, box.getBottom(), false));
+            g.fillRoundedRectangle(box, 6.0f);
+            g.setColour(juce::Colour(0xff3a3d43));
+            g.drawRoundedRectangle(box.reduced(0.5f), 6.0f, 1.0f);
+
+            g.setColour(juce::Colour(kLearn));
+            g.fillRect(box.getX() + 22.0f, box.getY() + 14.0f, 150.0f, 3.5f);
+            g.setFont(sans(13.0f, true));
+            g.setColour(juce::Colour(0xfff0f0f0));
+            g.drawText("MIDI controller profiles", m_box.getX() + 22, m_box.getY() + 22, 300, 18, juce::Justification::centredLeft, false);
+
+            const int x = m_box.getX() + 22;
+            g.setFont(sans(11.5f));
+            g.setColour(juce::Colour(0xffb9bbc0));
+            g.drawText("Profile", x, m_profile.getY(), kCaption, 26, juce::Justification::centredLeft, false);
+            g.drawText("Name", x, m_name.getY(), kCaption, 26, juce::Justification::centredLeft, false);
+
+            // column heads of the list
+            g.setFont(sans(10.0f));
+            const int y = m_list.getY() - 15;
+            g.drawText("Control", m_list.getX() + kColControl, y, 110, 13, juce::Justification::centredLeft, false);
+            g.drawText("Parameter", m_list.getX() + kColTarget, y, 200, 13, juce::Justification::centredLeft, false);
+            g.drawText("Values it sends", m_list.getX() + kColRange, y, 110, 13, juce::Justification::centredLeft, false);
+
+            // what the assigned controls last sent and what it was taken for
+            if(const auto* learn = m_proc.getMidiLearn())
+            {
+                g.setFont(sans(10.5f, true));
+                g.setColour(juce::Colour(kLearn));
+                g.drawText("Last received", x, m_list.getBottom() + 5, 86, 14, juce::Justification::centredLeft, false);
+                g.setFont(sans(10.5f));
+                g.setColour(juce::Colour(0xfff0f0f0));
+                g.drawText(learn->getMonitorText(), x + 86, m_list.getBottom() + 5, m_box.getWidth() - 44 - 86, 14, juce::Justification::centredLeft, true);
+            }
+
+            g.setColour(juce::Colour(0xffb9bbc0));
+            g.setFont(sans(10.5f));
+            const auto notes = juce::Rectangle<int>(x, m_list.getBottom() + 25, m_box.getWidth() - 44, 28);
+            g.drawFittedText("To assign: close this page, press Learn, click a parameter and move a control of your keyboard. "
+                             "A right click on a parameter clears it. How far a control goes is learned from it: turn it fully once. A click on the values here makes it learn again.",
+                             notes, juce::Justification::topLeft, 2, 0.9f);
+
+            if(m_error.isNotEmpty())
+            {
+                g.setColour(juce::Colour(kLedOn));
+                g.setFont(sans(11.0f));
+                g.drawText(m_error, x, m_close.getY(), m_close.getX() - x - 10, 24, juce::Justification::centredLeft, false);
+            }
+        }
+
+        void mouseDown(const juce::MouseEvent& e) override
+        {
+            if(!m_box.contains(e.getPosition()))
+                setVisible(false);
+        }
+
+    private:
+        static constexpr int kCaption = 70;
+        static constexpr int kRow = 22;
+        static constexpr int kColControl = 10;
+        static constexpr int kColTarget  = 130;
+        static constexpr int kColRange   = 400;
+        static constexpr int kRemoveWidth = 34;
+
+        int getNumRows() override
+        {
+            const auto* learn = m_proc.getMidiLearn();
+            return learn ? static_cast<int>(learn->getMappings().size()) : 0;
+        }
+
+        void paintListBoxItem(const int row, juce::Graphics& g, const int width, const int height, bool) override
+        {
+            const auto* learn = m_proc.getMidiLearn();
+            if(!learn || row < 0 || row >= static_cast<int>(learn->getMappings().size()))
+                return;
+            const auto& m = learn->getMappings()[static_cast<size_t>(row)];
+            if(row & 1)
+                g.fillAll(juce::Colour(0xff131417));
+
+            g.setFont(sans(11.5f, true));
+            g.setColour(juce::Colour(kLearn));
+            g.drawText(MidiLearn::controllerName(m), kColControl, 0, kColTarget - kColControl - 6, height, juce::Justification::centredLeft, false);
+            g.setFont(sans(11.5f));
+            g.setColour(juce::Colour(0xfff0f0f0));
+            g.drawText(MidiLearn::targetName(m.target), kColTarget, 0, kColRange - kColTarget - 6, height, juce::Justification::centredLeft, false);
+            // how far the control goes, as learned from it; nothing yet after a click here
+            g.setColour(juce::Colour(m.max > 0 ? 0xfff0f0f0 : kLearn));
+            g.drawText(m.max > 0 ? "0 - " + juce::String(static_cast<int>(m.max)) : juce::String("turn it fully"),
+                       kColRange, 0, 110, height, juce::Justification::centredLeft, false);
+
+            g.setColour(juce::Colour(0xffb9bbc0));
+            g.setFont(sans(10.5f));
+            g.drawText("Remove", width - 70, 0, 62, height, juce::Justification::centredRight, false);
+        }
+
+        void listBoxItemClicked(const int row, const juce::MouseEvent& e) override
+        {
+            auto* learn = m_proc.getMidiLearn();
+            if(!learn || row < 0)
+                return;
+            m_error.clear();
+            m_confirmDelete = m_confirmClear = false;
+            if(e.x >= m_list.getVisibleContentWidth() - 70)
+                learn->removeMapping(static_cast<size_t>(row));
+            else if(e.x >= kColRange && e.x < kColRange + 110)
+                learn->relearnRange(static_cast<size_t>(row));
+            sync();
+        }
+
+        void pickProfile()
+        {
+            auto* learn = m_proc.getMidiLearn();
+            const int index = m_profile.getSelectedItemIndex();
+            if(!learn || index < 0)
+                return;
+            const auto name = m_profile.getItemText(index);
+            m_confirmDelete = m_confirmClear = false;
+            m_error = learn->selectProfile(name) ? juce::String() : juce::String("That profile could not be read.");
+            if(m_error.isEmpty())
+                m_name.setText(MidiLearn::isBuiltIn(name) ? juce::String() : name, false);
+            sync();
+        }
+
+        void save()
+        {
+            auto* learn = m_proc.getMidiLearn();
+            if(!learn)
+                return;
+            m_confirmDelete = m_confirmClear = false;
+            m_error = learn->saveProfile(learn->getProfileName());
+            sync();
+        }
+
+        void saveAs()
+        {
+            auto* learn = m_proc.getMidiLearn();
+            if(!learn)
+                return;
+            m_confirmDelete = m_confirmClear = false;
+            m_error = learn->saveProfile(m_name.getText());
+            if(m_error.isEmpty())
+                m_name.setText(learn->getProfileName(), false);
+            sync();
+        }
+
+        // The assignments in the list go to a JSON file of the player's choice.
+        void exportFile()
+        {
+            const auto* learn = m_proc.getMidiLearn();
+            if(!learn || learn->getMappings().empty())
+                return;
+            m_error.clear();
+            m_confirmDelete = m_confirmClear = false;
+            repaint();
+
+            const auto start = m_folder.getChildFile(juce::File::createLegalFileName(learn->getProfileName()) + ".json");
+            m_chooser = std::make_unique<juce::FileChooser>("Export the MIDI profile", start, "*.json");
+            juce::Component::SafePointer<MidiOverlay> safe(this);
+            m_chooser->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                                   | juce::FileBrowserComponent::warnAboutOverwriting,
+                                   [safe](const juce::FileChooser& fc)
+            {
+                auto chosen = fc.getResult();
+                auto* learn = safe ? safe->m_proc.getMidiLearn() : nullptr;
+                if(!learn || chosen == juce::File())
+                    return;
+                if(!chosen.hasFileExtension("json"))
+                    chosen = chosen.withFileExtension("json");
+                safe->m_folder = chosen.getParentDirectory();
+                safe->m_error = learn->exportProfile(chosen);
+                if(safe->m_error.isEmpty())
+                    safe->m_error = "Exported to " + chosen.getFileName() + ".";
+                safe->sync();
+            });
+        }
+
+        // A profile from a JSON file joins the saved ones and becomes the one in use.
+        void importFile()
+        {
+            if(!m_proc.getMidiLearn())
+                return;
+            m_error.clear();
+            m_confirmDelete = m_confirmClear = false;
+            repaint();
+
+            m_chooser = std::make_unique<juce::FileChooser>("Import a MIDI profile", m_folder, "*.json");
+            juce::Component::SafePointer<MidiOverlay> safe(this);
+            m_chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                                   [safe](const juce::FileChooser& fc)
+            {
+                const auto chosen = fc.getResult();
+                auto* learn = safe ? safe->m_proc.getMidiLearn() : nullptr;
+                if(!learn || chosen == juce::File())
+                    return;
+                safe->m_folder = chosen.getParentDirectory();
+                safe->m_error = learn->importProfile(chosen);
+                if(safe->m_error.isEmpty())
+                {
+                    safe->m_name.setText(learn->getProfileName(), false);
+                    safe->m_error = "Imported as \"" + learn->getProfileName() + "\".";
+                }
+                safe->sync();
+            });
+        }
+
+        // Every assignment at once. The first press asks, the second clears; the profile on
+        // file stays as it is until it is saved.
+        void clearAll()
+        {
+            auto* learn = m_proc.getMidiLearn();
+            if(!learn || learn->getMappings().empty())
+                return;
+            m_error.clear();
+            m_confirmDelete = false;
+            if(!m_confirmClear)
+            {
+                m_confirmClear = true;
+                m_error = "Press Clear again to remove all " + juce::String(static_cast<int>(learn->getMappings().size())) + " assignments.";
+            }
+            else
+            {
+                m_confirmClear = false;
+                learn->clearAll();
+            }
+            sync();
+        }
+
+        // the first press asks, the second deletes
+        void remove()
+        {
+            auto* learn = m_proc.getMidiLearn();
+            if(!learn || MidiLearn::isBuiltIn(learn->getProfileName()))
+                return;
+            m_error.clear();
+            if(!m_confirmDelete)
+            {
+                m_confirmDelete = true;
+                m_confirmClear = false;
+                m_error = "Press Delete again to delete the profile \"" + learn->getProfileName() + "\".";
+            }
+            else
+            {
+                m_confirmDelete = m_confirmClear = false;
+                if(!learn->deleteProfile(learn->getProfileName()))
+                    m_error = "The profile could not be deleted.";
+                else
+                    m_name.setText({}, false);
+            }
+            sync();
+        }
+
+        HeadlessProcessor& m_proc;
+        juce::Rectangle<int> m_box;
+        juce::ComboBox m_profile;
+        juce::TextEditor m_name;
+        juce::ListBox m_list;
+        TextKey m_saveAs { "Save as" };
+        TextKey m_save { "Save" };
+        TextKey m_delete { "Delete" };
+        TextKey m_close { "Close" };
+        TextKey m_clear { "Clear" };
+        TextKey m_import { "Import" };
+        TextKey m_export { "Export" };
+        // where the last file was exported to or imported from
+        juce::File m_folder { juce::File::getSpecialLocation(juce::File::userDocumentsDirectory) };
+        std::unique_ptr<juce::FileChooser> m_chooser;
+        juce::String m_error;
+        bool m_confirmDelete = false;
+        bool m_confirmClear = false;
+    };
+
     // ── EditPanel ─────────────────────────────────────────────────────────────
 
     namespace
@@ -1129,6 +1627,25 @@ namespace retromulator
         m_initBtn = std::move(init);
         addAndMakeVisible(*m_initBtn);
 
+        auto learn = std::make_unique<TextKey>("Learn");
+        learn->setClickingTogglesState(true);
+        learn->onClick = [this] { setLearning(m_learnBtn->getToggleState()); };
+        m_learnBtn = std::move(learn);
+        addAndMakeVisible(*m_learnBtn);
+
+        auto midi = std::make_unique<TextKey>("MIDI");
+        midi->onClick = [this]
+        {
+            setLearning(false);
+            m_midiOverlay->open();
+        };
+        m_midiBtn = std::move(midi);
+        addAndMakeVisible(*m_midiBtn);
+
+        // over the controls, under the two pages
+        m_learnLayer = std::make_unique<LearnLayer>(*this);
+        addChildComponent(*m_learnLayer);
+
         m_saveOverlay = std::make_unique<SaveOverlay>(m_proc, [this]
         {
             if(onProgramChanged)
@@ -1136,11 +1653,32 @@ namespace retromulator
         });
         addChildComponent(*m_saveOverlay);
 
+        m_midiOverlay = std::make_unique<MidiOverlay>(m_proc);
+        addChildComponent(*m_midiOverlay);
+
         setSize(rackPanel::kWidth, kHeight);
         refresh();
     }
 
-    EditPanel::~EditPanel() = default;
+    EditPanel::~EditPanel()
+    {
+        // nobody is left to pick a parameter
+        if(auto* learn = m_proc.getMidiLearn())
+            learn->setLearning(false);
+    }
+
+    void EditPanel::visibilityChanged()
+    {
+        if(!isVisible())
+            setLearning(false);
+    }
+
+    void EditPanel::setLearning(const bool on)
+    {
+        if(auto* learn = m_proc.getMidiLearn())
+            learn->setLearning(on);
+        refresh();
+    }
 
     void EditPanel::addSections()
     {
@@ -1294,6 +1832,34 @@ namespace retromulator
         m_saveBtn->setEnabled(usable);
         m_revertBtn->setEnabled(usable);
         m_initBtn->setEnabled(usable);
+        m_learnBtn->setEnabled(usable);
+        m_midiBtn->setEnabled(usable);
+
+        // what the MIDI learn waits for, has assigned, or which profile it holds
+        if(const auto* learn = m_proc.getMidiLearn())
+        {
+            if(!usable && learn->isLearning())
+                m_proc.getMidiLearn()->setLearning(false);
+            if(learn->getRevision() != m_learnRevision)
+            {
+                m_learnRevision = learn->getRevision();
+                m_learnStatus = learn->getStatus();
+                m_profileText = learn->getProfileName() + (learn->isModified() ? " *" : "");
+                m_learnBtn->setToggleState(learn->isLearning(), juce::dontSendNotification);
+                m_learnLayer->setVisible(learn->isLearning());
+                m_learnLayer->repaint();
+                if(m_midiOverlay->isVisible())
+                    m_midiOverlay->sync();
+                repaint(0, 0, getWidth(), kHeaderHeight);
+            }
+            // the monitor of the page of the profiles follows what comes in
+            if(learn->getMonitorCount() != m_monitorCount)
+            {
+                m_monitorCount = learn->getMonitorCount();
+                if(m_midiOverlay->isVisible())
+                    m_midiOverlay->repaint();
+            }
+        }
 
         // with no edit left the program plays again, and the processor says so
         const bool edited = m_proc.hasMatrixPatchEdits();
@@ -1335,7 +1901,11 @@ namespace retromulator
         m_saveBtn->setBounds(getWidth() - kLeft - 84, 7, 84, 22);
         m_revertBtn->setBounds(m_saveBtn->getX() - 8 - 84, 7, 84, 22);
         m_initBtn->setBounds(m_revertBtn->getX() - 8 - 84, 7, 84, 22);
+        m_learnBtn->setBounds(m_initBtn->getX() - 20 - 72, 7, 72, 22);
+        m_midiBtn->setBounds(m_learnBtn->getX() - 8 - 60, 7, 60, 22);
+        m_learnLayer->setBounds(0, kHeaderHeight, getWidth(), getHeight() - kHeaderHeight);
         m_saveOverlay->setBounds(getLocalBounds());
+        m_midiOverlay->setBounds(getLocalBounds());
     }
 
     void EditPanel::paint(juce::Graphics& g)
@@ -1356,15 +1926,28 @@ namespace retromulator
 
         const juce::Rectangle<float> screen(118.0f, 6.0f, 240.0f, 24.0f);
         drawScreen(g, screen);
-        g.setColour(juce::Colour(kTrace));
+        // while assignments are learned the screen says what the learning waits for or did
+        g.setColour(juce::Colour(m_learnStatus.isNotEmpty() ? kLearn : kTrace));
         g.setFont(sans(13.5f, true));
-        g.drawText(m_initialised ? juce::String("INIT   (not saved)") : m_patchTitle,
-                   screen.reduced(10.0f, 0.0f).toNearestInt(), juce::Justification::centredLeft, false);
+        g.drawFittedText(m_learnStatus.isNotEmpty() ? m_learnStatus : (m_initialised ? juce::String("INIT   (not saved)") : m_patchTitle),
+                         screen.reduced(10.0f, 0.0f).toNearestInt(), juce::Justification::centredLeft, 1, 0.7f);
 
         drawLed(g, 378.0f, 18.0f, m_edited);
         g.setColour(juce::Colour(st.label));
         g.setFont(sans(9.5f));
         g.drawText("Edited", 388, 7, 60, 22, juce::Justification::centredLeft, false);
+
+        // the profile of controller assignments in use, with a star when it was changed
+        if(m_midiBtn != nullptr && m_profileText.isNotEmpty())
+        {
+            const int x = 440;
+            const int w = m_midiBtn->getX() - 8 - x;
+            g.setFont(sans(9.5f));
+            g.drawText("MIDI profile", x, 4, w, 11, juce::Justification::centredRight, false);
+            g.setColour(juce::Colour(st.value));
+            g.setFont(sans(11.0f, true));
+            g.drawFittedText(m_profileText, x, 15, w, 15, juce::Justification::centredRight, 1, 0.7f);
+        }
 
         for(const auto& s : m_sections)
         {

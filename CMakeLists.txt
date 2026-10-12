@@ -8,7 +8,7 @@ if(MSVC OR WIN32)
 	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-project(Retromulator VERSION 0.8.9 LANGUAGES C CXX)
+project(Retromulator VERSION 0.9.0 LANGUAGES C CXX)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 	set(CMAKE_BUILD_TYPE Release)
@@ -72,7 +72,7 @@ juce_add_plugin(Retromulator
 juce_add_binary_data(RetromulatorData SOURCES ${RETROMULATOR_RESOURCES})
 
 # Rack panel and patch editor of the GPL editor, not listed in the .jucer
-target_sources(Retromulator PRIVATE ${RETROMULATOR_SOURCES} source/plugin/RackPanel.cpp source/plugin/EditPanel.cpp)
+target_sources(Retromulator PRIVATE ${RETROMULATOR_SOURCES} source/plugin/RackPanel.cpp source/plugin/EditPanel.cpp source/plugin/MidiLearn.cpp)
 
 target_include_directories(Retromulator PRIVATE
 	source
@@ -109,6 +109,12 @@ target_compile_definitions(Retromulator
 		FLOATING_POINT=1
 		RANDOM_PREFIX=synthLib_speex
 )
+
+# ASIO drivers in the standalone app. The headers come with JUCE; of the two licences
+# Steinberg gives them under, this project takes the GPL v3.
+if(WIN32)
+	target_compile_definitions(Retromulator PUBLIC JUCE_ASIO=1)
+endif()
 
 if(MSVC)
 	target_compile_options(Retromulator PRIVATE /bigobj)

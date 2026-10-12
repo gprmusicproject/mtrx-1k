@@ -403,6 +403,66 @@ namespace retromulator
         return nullptr;
     }
 
+    int ParameterPool::getBuiltInNative(const int cc) const
+    {
+        const auto* map = m_current.load(std::memory_order_acquire);
+        if(!map || cc < 0 || cc > 127)
+            return -1;
+        const int slot = map->ccToSlot[static_cast<size_t>(cc)];
+        if(slot < 0)
+            return -1;
+        const auto& b = m_slots[static_cast<size_t>(slot)]->binding();
+        return b.desc ? b.native : -1;
+    }
+
+    namespace
+    {
+        // 0..max over lo..hi. A control with at least as many steps as the range has values
+        // gives every value an equal share of its travel. One with fewer steps, an NRPN that
+        // runs from 0 to 60 on a range of 0 to 63, cannot reach every value: its ends are the
+        // ends of the range and the steps between fall where they come nearest.
+        int spread(const int value, const int max, const int lo, const int hi)
+        {
+            const auto v = static_cast<int64_t>(juce::jlimit(0, max, value));
+            const int values = hi - lo + 1;
+            if(max + 1 >= values)
+                return juce::jlimit(lo, hi, lo + static_cast<int>(v * values / (max + 1)));
+            return juce::jlimit(lo, hi, lo + static_cast<int>((v * (hi - lo) * 2 + max) / (2 * static_cast<int64_t>(max))));
+        }
+    }
+
+    void ParameterPool::setFromController(const int native, const int value, const int max)
+    {
+        auto* s = findNativeSlot(native);
+        if(!s || max <= 0)
+            return;
+        const auto& b = s->binding();
+        if(!b.desc)
+            return;
+        const int v = spread(value, max, b.desc->range.getStart(), b.desc->range.getEnd());
+        if(v == s->getMidiValue())
+            return;
+        s->setFromMidi(v, true);
+        sendSlot(*s, b, v);
+    }
+
+    void ParameterPool::setBusFromController(const int bus, const int field, const int value, const int max)
+    {
+        if(bus < 0 || bus >= MatrixBusCount || max <= 0 || m_core != SynthType::Matrix)
+            return;
+        auto b = getMatrixBus(bus);
+        const auto before = packBus(b);
+        switch(field)
+        {
+        case 0:  b.source = static_cast<uint8_t>(spread(value, max, 0, matrixLib::patch::SourceCount - 1)); break;
+        case 1:  b.amount = static_cast<int8_t>(spread(value, max, -63, 63)); break;
+        case 2:  b.destination = static_cast<uint8_t>(spread(value, max, 0, matrixLib::patch::DestinationCount - 1)); break;
+        default: return;
+        }
+        if(packBus(b) != before)
+            setMatrixBus(bus, b);
+    }
+
     ParameterPool::MatrixBus ParameterPool::getMatrixBus(const int bus) const
     {
         if(bus < 0 || bus >= MatrixBusCount)
@@ -494,17 +554,12 @@ namespace retromulator
                               || ev.source == synthLib::MidiEventSource::Physical;
         auto* s = m_slots[static_cast<size_t>(slot)];
 
-        // The Matrix firmware ignores these CCs: spread 0-127 over the parameter's range
-        // and send it as a remote parameter edit
+        // The patch parameters of the Matrix are not moved from here: which control moves
+        // which is a matter of the MIDI learn and its profiles, of which this map is the
+        // standard one. Only the instrument's own controllers are mirrored below.
         const auto& b = s->binding();
         if(map->type == SynthType::Matrix && b.native >= 0 && b.desc)
-        {
-            const int lo = b.desc->range.getStart();
-            const int v = lo + ev.c * (b.desc->range.getEnd() - lo + 1) / 128;
-            s->setFromMidi(v, fromOutside);
-            sendSlot(*s, b, v);
-            return true;
-        }
+            return false;
 
         const bool isSwitch = status == synthLib::M_CONTROLCHANGE && isSwitchSlot(s->binding());
         s->setFromMidi(isSwitch ? (ev.c >= 64 ? 1 : 0) : ev.c, fromOutside);

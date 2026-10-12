@@ -7,6 +7,7 @@
 #include "MinimalController.h"
 #include "SynthFactory.h"
 #include "ParameterPool.h"
+#include "MidiLearn.h"
 #include "BinaryData.h"
 
 #include "synthLib/deviceException.h"
@@ -635,6 +636,7 @@ namespace retromulator
         // bound to the Matrix core, the one this product starts, before it is up.
         m_paramPool = std::make_unique<ParameterPool>(*this);
         m_paramPool->setCore(SynthType::Matrix);
+        m_midiLearn = std::make_unique<MidiLearn>(*this);
         m_programRelay = std::make_unique<ProgramChangeRelay>(*this);
 
         // The product was called TESSERACT-1000 and then MATRIX-1K. The data folder of the
@@ -4246,26 +4248,68 @@ namespace retromulator
             // A program change selects a position of the loaded bank, on the message thread.
             // Passed on, the firmware would load from its own memory instead: the sound
             // changes and the panel still shows the patch it had.
+            // The controllers that are assigned to patch parameters go to the MIDI learn alone:
+            // the firmware has no use for them, and an NRPN would reach it as loose data entry.
+            const auto* learn = m_midiLearn.get();
             int program = -1;
+            bool taken = false;
             for(const auto meta : midi)
             {
                 const auto m = meta.getMessage();
                 if(m.isProgramChange())
                     program = m.getProgramChangeNumber();
+                else if(learn && m.isController() && learn->wantsController(m.getControllerNumber()))
+                    taken = true;
             }
-            if(program >= 0)
+            if(program >= 0 || taken)
             {
                 juce::MidiBuffer kept;
+                std::vector<synthLib::SMidiEvent> controllers;
                 for(const auto meta : midi)
                 {
                     const auto m = meta.getMessage();
-                    if(!m.isProgramChange())
+                    if(m.isProgramChange())
+                        continue;
+                    if(taken && m.isController() && learn->wantsController(m.getControllerNumber()))
+                    {
+                        const auto* raw = m.getRawData();
+                        synthLib::SMidiEvent ev(synthLib::MidiEventSource::Host, raw[0], raw[1], raw[2]);
+                        ev.offset = static_cast<uint32_t>(std::max(0, meta.samplePosition));
+                        controllers.push_back(ev);
+                    }
+                    else
                         kept.addEvent(m, meta.samplePosition);
                 }
                 midi.swapWith(kept);
-                m_midiProgramChange.store(program);
-                if(m_programRelay)
-                    m_programRelay->triggerAsyncUpdate();
+
+                if(!controllers.empty())
+                {
+                    // A host that hands controllers over as parameter changes gives those of
+                    // one moment in no order of its own: the number of an NRPN or RPN comes
+                    // before the data entry, and of that the MSB before the LSB.
+                    const auto rank = [](const synthLib::SMidiEvent& e)
+                    {
+                        switch(e.b)
+                        {
+                        case 99: case 101: return 0;
+                        case 98: case 100: return 1;
+                        case 6:            return 2;
+                        case 38:           return 3;
+                        default:           return 4;
+                        }
+                    };
+                    std::stable_sort(controllers.begin(), controllers.end(), [&rank](const synthLib::SMidiEvent& a, const synthLib::SMidiEvent& b)
+                    {
+                        return a.offset != b.offset ? a.offset < b.offset : rank(a) < rank(b);
+                    });
+                    getController().enqueueMidiMessages(controllers);
+                }
+                if(program >= 0)
+                {
+                    m_midiProgramChange.store(program);
+                    if(m_programRelay)
+                        m_programRelay->triggerAsyncUpdate();
+                }
             }
         }
         // Runs for every core, and from the audio path rather than a host callback that
@@ -4385,6 +4429,8 @@ namespace retromulator
     static constexpr int32_t kMatrixLfoSyncMagic = 0x534C584D;   // 'MXLS'
     // 'MXED': the patch editor, a bit field. 1 = open, 2 = the sound is the initialised patch.
     static constexpr int32_t kMatrixEditorMagic = 0x4445584D;
+    // 'MXML': the controller assignments of the MIDI learn in use, as text.
+    static constexpr int32_t kMatrixLearnMagic = 0x4C4D584D;
     // "E88D": the board. Written last, and read back from the tail before the device is
     // created, so the boot picks the right one without parsing the blocks in between.
     static constexpr int32_t kEmu88BoardMagic = 0x44383845;
@@ -4470,6 +4516,13 @@ namespace retromulator
         {
             appendInt32(destData, kMatrixEditorMagic);
             appendInt32(destData, (m_editPanelOpen ? 1 : 0) | (isMatrixInitPatch() ? 2 : 0));
+
+            // ['MXML':int32][length:int32][text]
+            if(m_midiLearn)
+            {
+                appendInt32(destData, kMatrixLearnMagic);
+                appendString(destData, m_midiLearn->toStateString().toStdString());
+            }
         }
 
         // 88emu per-part programs and the edited part:
@@ -4839,6 +4892,25 @@ namespace retromulator
         else
         {
             offset = editorStart;
+        }
+
+        // The controller assignments (optional). A session saved before they existed used
+        // the built-in map, which is the standard profile.
+        const int learnStart = offset;
+        int32_t learnMagic = 0;
+        std::string learnState;
+        if(newType == SynthType::Matrix
+           && readInt32(bytes, sizeInBytes, offset, learnMagic) && learnMagic == kMatrixLearnMagic
+           && readString(bytes, sizeInBytes, offset, learnState))
+        {
+            if(m_midiLearn)
+                m_midiLearn->fromStateString(juce::String::fromUTF8(learnState.data(), static_cast<int>(learnState.size())));
+        }
+        else
+        {
+            offset = learnStart;
+            if(newType == SynthType::Matrix && m_midiLearn)
+                m_midiLearn->fromStateString({});
         }
 
         // The state carries the bank as it was when it was saved. Its file is what the

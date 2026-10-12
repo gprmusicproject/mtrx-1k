@@ -37,12 +37,15 @@ namespace retromulator
 
         void paint(juce::Graphics& g) override;
         void resized() override;
+        void visibilityChanged() override;
 
         struct Context;
         class Control;
 
     private:
         class SaveOverlay;
+        class LearnLayer;
+        class MidiOverlay;
 
         struct Section
         {
@@ -54,6 +57,8 @@ namespace retromulator
         void showSave();
         void revert();
         void init();
+        // Learning of controller assignments on or off; the controls are covered while it is on.
+        void setLearning(bool on);
 
         HeadlessProcessor& m_proc;
         std::unique_ptr<Context> m_context;
@@ -62,6 +67,14 @@ namespace retromulator
         std::vector<std::unique_ptr<Control>> m_controls;
         std::unique_ptr<juce::Button> m_saveBtn, m_revertBtn, m_initBtn;
         std::unique_ptr<SaveOverlay> m_saveOverlay;
+
+        // MIDI learn: its two keys, the layer over the controls and the page of the profiles
+        std::unique_ptr<juce::Button> m_learnBtn, m_midiBtn;
+        std::unique_ptr<LearnLayer> m_learnLayer;
+        std::unique_ptr<MidiOverlay> m_midiOverlay;
+        uint32_t m_learnRevision = 0;     // what of the MIDI learn the panel last drew
+        uint32_t m_monitorCount = 0;
+        juce::String m_learnStatus, m_profileText;
 
         juce::String m_patchTitle;
         // The sound is the initialised patch, not the program the title names. Kept by the

@@ -1,6 +1,7 @@
 #include "MinimalController.h"
 #include "HeadlessProcessor.h"
 #include "ParameterPool.h"
+#include "MidiLearn.h"
 #include "jucePluginLib/processor.h"
 
 namespace retromulator
@@ -23,7 +24,13 @@ namespace retromulator
 
     bool MinimalController::parseControllerMessage(const synthLib::SMidiEvent& ev)
     {
-        auto* pool = static_cast<HeadlessProcessor&>(getProcessor()).getParameterPool();
+        auto& proc = static_cast<HeadlessProcessor&>(getProcessor());
+        // the assignments of the MIDI learn come first; what they do not take is the
+        // instrument's own, and is mirrored into its host parameter
+        if(proc.getSynthType() == SynthType::Matrix)
+            if(auto* learn = proc.getMidiLearn(); learn && learn->handleController(ev))
+                return true;
+        auto* pool = proc.getParameterPool();
         return pool && pool->handleIncomingCC(ev);
     }
 }

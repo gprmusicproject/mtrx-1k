@@ -14,7 +14,8 @@ MTRX-1K is not affiliated with, endorsed by or connected to Oberheim. Oberheim a
 - A patch editor the instrument never had: every parameter of a patch on one page, with the ten buses of the modulation matrix, envelope and tracking graphs, and the real depth of a modulation amount shown under its knob.
 - Init, Revert and Save: a patch can be written to a position of the RAM bank or to a bank of your own. The RAM bank is copied to a backup folder before its first change.
 - The 800 factory patches of banks 2 to 9 are read from the patch EPROM into bank files with their factory names.
-- Every patch parameter is a host parameter that can be automated, and is mapped to a MIDI controller.
+- Every patch parameter is a host parameter that can be automated.
+- MIDI learn: any patch parameter, the buses of the modulation matrix included, is assigned to a control of your keyboard by clicking it and moving the control. Whether the control sends control changes or NRPNs, and with 7 or 14 bit values, is taken from what arrives. Sets of assignments are kept as named profiles that can be saved, changed and deleted, and exported to a JSON file and imported from one, to keep them or pass them on. The map the plugin always had, one control change per parameter, is the profile "Standard"; "None" assigns nothing.
 - Both LFOs can follow the host tempo. A cycle of the firmware's LFO lasts a whole number of steps of 26.6 ms, so a division is met within a few percent, not exactly.
 - A MIDI program change selects that position of the loaded bank.
 
@@ -22,7 +23,7 @@ Where the original moves a pitch or a control voltage in audible steps, about 75
 
 ## Status
 
-Version 0.8.9, October 2026. Built and tested on Windows 11 as a VST3 in Cubase 15 and as a standalone app. The build files for other systems come from Retromulator and have not been tried with this version.
+Version 0.9.0, October 2026. Built and tested on Windows 11 as a VST3 in Cubase 15 and as a standalone app. The build files for other systems come from Retromulator and have not been tried with this version.
 
 ## Firmware
 
@@ -31,7 +32,7 @@ The firmware is not included and is not part of this repository. You need your o
 - the 32 KB system EPROM of the instrument, firmware version 1.20;
 - the 64 KB patch EPROM, for the factory patches of banks 2 to 9 (optional).
 
-Put the two `.bin` files in `Documents\GPR Music Project\MTRX-1K\ROM`. They are recognised by their size and content, not by their name. The banks are kept next to that folder, in `Documents\GPR Music Project\MTRX-1K\Patch`.
+Put the two `.bin` files in `Documents\GPR Music Project\MTRX-1K\ROM`. They are recognised by their size and content, not by their name. The banks are kept next to that folder, in `Documents\GPR Music Project\MTRX-1K\Patch`, and the MIDI learn profiles in `Documents\GPR Music Project\MTRX-1K\MIDI`.
 
 ## Building on Windows
 
@@ -51,7 +52,7 @@ This is a modified version of Retromulator 1.8.0 (commit `c20db50` of github.com
 
 - **Build**: a CMake project for Windows (`CMakeLists.txt`, `cmake/`, `build_win.bat`) next to the Projucer project of Retromulator.
 - **Product**: name, vendor and plugin identifiers of MTRX-1K; only the Matrix-1000 core is started. The other cores of Retromulator are still in the source tree and are compiled in.
-- **Interface** (`source/plugin`): the rack panel (`RackPanel`), the patch editor (`EditPanel`), saving and bank handling, the session state of the editor, automatable parameters, program change.
+- **Interface** (`source/plugin`): the rack panel (`RackPanel`), the patch editor (`EditPanel`), saving and bank handling, the session state of the editor, automatable parameters, program change, and the MIDI learn with its profiles (`MidiLearn`).
 - **Emulation** (`source/matrixLib`): the three sync modes after the schematic of the voice board; the timer writes with which the firmware moves a pitch; joined pitch and control voltage steps; the height of the oscillator ramp through a pitch change; the DCO click; pacing of remote parameter edits so that held notes follow a knob; portamento rate 0 in unison; the LFO rates used for the tempo sync.
 
 ## The name and the symbol
@@ -92,7 +93,7 @@ JUCE integration, UI, AAX/AU/VST3 plumbing is developed separately.
 
 ## License
 
-MTRX-1K as a whole, with the changes made by GPR Music Project, is licensed under the **GNU General Public License v3.0**, see [LICENSE.txt](LICENSE.txt). It comes with no warranty. JUCE, in `Modules/JUCE`, is used under the **GNU Affero General Public License v3.0**, see its own LICENSE.md.
+MTRX-1K as a whole, with the changes made by GPR Music Project, is licensed under the **GNU General Public License v3.0**, see [LICENSE.txt](LICENSE.txt). It comes with no warranty. JUCE, in `Modules/JUCE`, is used under the **GNU Affero General Public License v3.0**, see its own LICENSE.md. The standalone app on Windows talks to ASIO drivers through the ASIO headers that come with JUCE, used under the **GPL v3**, one of the two licences Steinberg gives them under. ASIO is a trademark and software of Steinberg Media Technologies GmbH.
 
 From the README of Retromulator, for the parts it contains ("this repository" there means Retromulator):
 

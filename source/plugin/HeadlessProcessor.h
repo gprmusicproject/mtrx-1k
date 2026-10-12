@@ -30,6 +30,7 @@ namespace matrixLib { class Device; }
 namespace retromulator
 {
     class ParameterPool;
+    class MidiLearn;
 
     class HeadlessProcessor final : public pluginLib::Processor
     {
@@ -270,6 +271,8 @@ namespace retromulator
 
         // 128 fixed host parameters, rebound per core. Null until the constructor finishes.
         ParameterPool* getParameterPool() const { return m_paramPool.get(); }
+        // MIDI learn of the Matrix patch parameters. Null until the constructor finishes.
+        MidiLearn* getMidiLearn() const { return m_midiLearn.get(); }
 
         // ── Data folder helpers ─────────────────────────────────────────────
         static std::string getDataFolder();
@@ -487,6 +490,7 @@ namespace retromulator
         void applyMidiProgramChange();
         std::string m_romPath;
         std::unique_ptr<ParameterPool> m_paramPool;
+        std::unique_ptr<MidiLearn> m_midiLearn;
 
         // GUI size saved/restored across DAW sessions and settings.xml
         int  m_savedEditorWidth  = 0;

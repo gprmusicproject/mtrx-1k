@@ -148,6 +148,14 @@ namespace retromulator
         // Slot bound to a core-specific parameter index, or null.
         SlotParameter* findNativeSlot(int native) const;
 
+        // The core-specific parameter the built-in map gives a control change, or -1.
+        int getBuiltInNative(int cc) const;
+        // Message thread. A value of 0 to max from a control of the player's keyboard, spread
+        // over the range of a Matrix patch parameter or of one field of a modulation bus
+        // (0 source, 1 amount, 2 destination). Goes to the device when it changes the value.
+        void setFromController(int native, int value, int max);
+        void setBusFromController(int bus, int field, int value, int max);
+
         // ── Matrix-1000 patch editing ───────────────────────────────────────
         // The ten buses of the modulation matrix. The firmware takes source, amount and
         // destination of a bus in one message and there are not thirty free slots, so they
