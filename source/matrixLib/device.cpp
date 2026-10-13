@@ -24,6 +24,14 @@ namespace matrixLib
 
 		constexpr float BootRate = 48000.0f;
 
+		// The first start, for whoever shows it. Machine time of the calibration with firmware
+		// 1.20, the same at every cold start since the emulation has no chance in it, and the
+		// share of the whole wait it takes when the factory banks are read after it.
+		constexpr float ColdStartSeconds = 30.0f;
+		constexpr float CalibrationShare = 0.32f;
+		std::atomic<uint8_t> g_firstStartStage{0};
+		std::atomic<float> g_firstStartProgress{0.0f};
+
 		// the firmware keeps up with four times the MIDI rate, which keeps controller and
 		// pitch bend streams from queueing up behind the 31.25 kbaud UART
 		constexpr uint32_t UartCyclesPerByte = Hardware::MidiCyclesPerByte / 4;
@@ -173,12 +181,45 @@ namespace matrixLib
 		m_homePath = withSlash(_params.homePath);
 		m_valid = true;
 
+		// with banks to read after it, the calibration is only the first part of the wait
+		const bool readBanks = m_hasPatchRom && !m_homePath.empty() && romBanksMissing();
+		m_stageSpan = readBanks ? CalibrationShare : 1.0f;
+
 		boot();
 
-		if(m_hasPatchRom && !m_homePath.empty())
+		if(readBanks)
+		{
+			m_stageFrom = m_coldStart ? CalibrationShare : 0.0f;
+			m_stageSpan = 1.0f - m_stageFrom;
 			createRomBanks();
+		}
+		g_firstStartStage.store(static_cast<uint8_t>(FirstStartStage::None));
 
 		m_machine.getHardware().getAcia().setCyclesPerByte(UartCyclesPerByte);
+	}
+
+	Device::FirstStartStage Device::getFirstStartStage()
+	{
+		return static_cast<FirstStartStage>(g_firstStartStage.load());
+	}
+
+	float Device::getFirstStartProgress()
+	{
+		return g_firstStartProgress.load();
+	}
+
+	void Device::firstStart(const FirstStartStage _stage, const float _fraction) const
+	{
+		g_firstStartProgress.store(m_stageFrom + m_stageSpan * std::min(1.0f, std::max(0.0f, _fraction)));
+		g_firstStartStage.store(static_cast<uint8_t>(_stage));
+	}
+
+	bool Device::romBanksMissing() const
+	{
+		for(uint32_t bank = 2; bank <= 9; ++bank)
+			if(!fileExists(m_homePath + romBankFileName(bank)))
+				return true;
+		return false;
 	}
 
 	Device::~Device() = default;
@@ -271,10 +312,13 @@ namespace matrixLib
 		constexpr float step = 0.25f;
 		float t = 0.0f;
 		bool sawCalibration = false;
+		m_coldStart = true;
+		firstStart(FirstStartStage::Calibrating, 0.0f);
 		while(t < 60.0f)
 		{
 			runSeconds(step);
 			t += step;
+			firstStart(FirstStartStage::Calibrating, 0.97f * t / ColdStartSeconds);
 			if(m_machine.isCalibrating())
 				sawCalibration = true;
 			else if(sawCalibration || t > 5.0f)
@@ -285,6 +329,7 @@ namespace matrixLib
 		primeVoices();
 		saveSnapshot();
 		selectFirstProgram();
+		firstStart(FirstStartStage::Calibrating, 1.0f);
 	}
 
 	// Remote edits (opcodes 06 and 0B) are written where a pointer in the firmware's RAM
@@ -373,11 +418,9 @@ namespace matrixLib
 
 	void Device::createRomBanks()
 	{
-		bool missing = false;
-		for(uint32_t bank = 2; bank <= 9 && !missing; ++bank)
-			missing = !fileExists(m_homePath + romBankFileName(bank));
-		if(!missing)
+		if(!romBanksMissing())
 			return;
+		firstStart(FirstStartStage::ReadingBanks, 0.0f);
 
 		auto& hw = m_machine.getHardware();
 
@@ -398,6 +441,7 @@ namespace matrixLib
 			std::vector<uint8_t> out;
 			for(uint32_t n = 0; n < 100; ++n)
 			{
+				firstStart(FirstStartStage::ReadingBanks, static_cast<float>((bank - 2) * 100 + n) / 800.0f);
 				const auto reply = requestPatch(n);
 				auto data = patch::decode(reply);
 				if(!data)

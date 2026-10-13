@@ -37,6 +37,15 @@ namespace matrixLib
 		uint32_t getDspClockPercent() const override { return 100; }
 		uint64_t getDspClockHz() const override { return Hardware::CpuClock; }
 
+		// The first start with a firmware takes seconds: the firmware initialises its RAM and
+		// calibrates every voice, and the factory banks are read out of the patch EPROM. Both are
+		// done once and kept in files. While one of them runs, this says which (FirstStartStage)
+		// and how much of the whole is done, 0 to 1; at any other time the stage is None. The
+		// same for every instance of the process.
+		enum class FirstStartStage : uint8_t { None, Calibrating, ReadingBanks };
+		static FirstStartStage getFirstStartStage();
+		static float getFirstStartProgress();
+
 		// file names of the banks built from the patch EPROM, 2-9
 		static std::string romBankFileName(uint32_t _bank);
 
@@ -61,11 +70,18 @@ namespace matrixLib
 
 	private:
 		void boot();
+		bool romBanksMissing() const;
+		void firstStart(FirstStartStage _stage, float _fraction) const;
 		void primeVoices();
 		void selectFirstProgram();
 		bool loadSnapshot();
 		void saveSnapshot() const;
 		void runSeconds(float _seconds);
+
+		// the part of the first start the stage that runs covers
+		float m_stageFrom = 0.0f;
+		float m_stageSpan = 1.0f;
+		bool m_coldStart = false;
 
 		// asks the firmware for every patch of banks 2-9 and writes them as .syx files
 		void createRomBanks();

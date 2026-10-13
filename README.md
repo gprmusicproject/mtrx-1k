@@ -8,7 +8,7 @@ MTRX-1K is not affiliated with, endorsed by or connected to Oberheim. Oberheim a
 
 ## What it does
 
-- Runs the original firmware (version 1.20) on an emulated 6809 board: timers, UART, sample and hold DAC, latches. The firmware calibrates the voices itself on the first start; the result is kept, so later starts are immediate.
+- Runs the original firmware (version 1.20) on an emulated 6809 board: timers, UART, sample and hold DAC, latches. The firmware calibrates the voices itself on the first start, and the factory banks are read out of the patch EPROM; a panel shows the progress of both. The results are kept, so later starts are immediate.
 - Six voice models of the CEM3396 chip with band-limited oscillators, the three sync modes of the voice board, and 2x oversampling.
 - A rack panel with display, keypad, bank lock and patch selection as on the instrument, in a black or a white finish.
 - A patch editor the instrument never had: every parameter of a patch on one page, with the ten buses of the modulation matrix, envelope and tracking graphs, and the real depth of a modulation amount shown under its knob.
@@ -18,12 +18,13 @@ MTRX-1K is not affiliated with, endorsed by or connected to Oberheim. Oberheim a
 - MIDI learn: any patch parameter, the buses of the modulation matrix included, is assigned to a control of your keyboard by clicking it and moving the control. Whether the control sends control changes or NRPNs, and with 7 or 14 bit values, is taken from what arrives. Sets of assignments are kept as named profiles that can be saved, changed and deleted, and exported to a JSON file and imported from one, to keep them or pass them on. The map the plugin always had, one control change per parameter, is the profile "Standard"; "None" assigns nothing.
 - Both LFOs can follow the host tempo. A cycle of the firmware's LFO lasts a whole number of steps of 26.6 ms, so a division is met within a few percent, not exactly.
 - A MIDI program change selects that position of the loaded bank.
+- A Manual key on the panel opens the user manual, a PDF that the setup program installs next to the standalone app.
 
 Where the original moves a pitch or a control voltage in audible steps, about 75 times a second, MTRX-1K joins the steps. Everything else is meant to behave as the instrument does, firmware quirks included: the LFOs are one per voice, portamento glides from the note a voice played last, and the keyboard mode "Reassign Rob" does not rob a voice in firmware 1.20.
 
 ## Status
 
-Version 0.9.0, October 2026. Built and tested on Windows 11 as a VST3 in Cubase 15 and as a standalone app. The build files for other systems come from Retromulator and have not been tried with this version.
+Version 0.9.2, October 2026. Built and tested on Windows 11 as a VST3 in Cubase 15 and as a standalone app. The build files for other systems come from Retromulator and have not been tried with this version.
 
 ## Firmware
 
@@ -45,6 +46,16 @@ build_win.bat
 ```
 
 JUCE 8.0.15 comes as a submodule in `Modules/JUCE`. The plugin and the app are written to `build\win-release\Retromulator_artefacts\Release`, as `VST3\MTRX-1K.vst3` and `Standalone\MTRX-1K.exe`. To install the plugin, copy the `MTRX-1K.vst3` folder to `C:\Program Files\Common Files\VST3` while the host is closed.
+
+## The setup program
+
+`installer\mtrx-1k.iss` is the script of a setup program for Windows, made with [Inno Setup](https://jrsoftware.org/isinfo.php) 6:
+
+```
+ISCC.exe installer\mtrx-1k.iss
+```
+
+It takes the built app and plugin from `build\win-release` and the user manual, `MTRX-1K_User_Manual_v<version>.pdf`, from the root of the checkout, and writes `build\installer\out\MTRX-1K_<version>_Setup.exe`. The setup puts the standalone app and the manual in `Program Files\GPR Music Project\MTRX-1K`, the plugin in `Program Files\Common Files\VST3\GPR Music Project`, and makes the empty folders `ROM`, `Patch` and `MIDI` in `Documents\GPR Music Project\MTRX-1K`. It includes no firmware and no sounds. MTRX-1K is listed among the installed apps of Windows and removed from there; the uninstaller asks whether MIDI profiles and sounds are to be removed too. `/DTestRoot=<folder>` builds a setup that needs no administrator and installs under that folder, for trying it out. The pictures of the wizard are drawn by `installer\make_images.ps1`.
 
 ## What was changed
 

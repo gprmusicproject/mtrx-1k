@@ -5,6 +5,7 @@
 #include "ronaldo/88emu/88lib/deviceModel.h"
 #include "ronaldo/88emu/88lib/romloader.h"
 #include <climits>
+#include <cstdlib>
 #include <cmath>
 #include <fstream>
 
@@ -315,6 +316,9 @@ namespace retromulator
         };
         addAndMakeVisible(m_aboutBtn);
 
+        m_manualBtn.onClick = [this] { openManual(); };
+        addAndMakeVisible(m_manualBtn);
+
         m_editBtn.setClickingTogglesState(true);
         m_editBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff1f5fb0));
         m_editBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
@@ -325,6 +329,7 @@ namespace retromulator
         addChildComponent(m_editPanel);
 
         addChildComponent(m_about);
+        addChildComponent(m_startProgress);
         resized();
 
         updateStatus();
@@ -372,7 +377,9 @@ namespace retromulator
         // Browser strip
         const int y = kStripControlY, h = kStripControlH;
         m_aboutBtn  .setBounds(kAboutX, kAboutY, kAboutW, kAboutH);
+        m_manualBtn .setBounds(kAboutX, kManualY, kAboutW, kAboutH);
         m_about     .setBounds(0, 0, kWidth, kHeight);
+        m_startProgress.setBounds(0, 0, kWidth, kHeight);
         m_editBtn   .setBounds(kStripEditX, y, kStripEditW, h);
         m_editPanel .setBounds(0, kHeight, kWidth, EditPanel::kHeight);
         m_bankCombo .setBounds(kStripBankX, y, kStripBankW, h);
@@ -1074,6 +1081,42 @@ namespace retromulator
             });
     }
 
+    // The user manual is a PDF that the installer puts next to the standalone app. The plugin
+    // sits elsewhere and nothing is written to the registry, so the places it can be in are
+    // tried in turn: next to this binary, the program folder, the data folder.
+    void BasicEditor::openManual()
+    {
+        const juce::String name("MTRX-1K User Manual.pdf");
+        const juce::String folder("GPR Music Project\\MTRX-1K");
+
+        juce::Array<juce::File> places;
+        places.add(juce::File::getSpecialLocation(juce::File::currentExecutableFile).getSiblingFile(name));
+        for(const char* variable : {"ProgramW6432", "ProgramFiles"})
+            if(const char* programs = std::getenv(variable); programs && *programs)
+                places.addIfNotAlreadyThere(juce::File(juce::String(programs)).getChildFile(folder).getChildFile(name));
+        places.add(juce::File(juce::String(HeadlessProcessor::getDataFolder())).getChildFile(name));
+
+        for(const auto& file : places)
+            if(file.existsAsFile())
+            {
+                file.startAsProcess();
+                return;
+            }
+
+        juce::NativeMessageBox::showAsync(
+            juce::MessageBoxOptions()
+                .withIconType(juce::MessageBoxIconType::InfoIcon)
+                .withTitle("MTRX-1K")
+                .withMessage("The user manual was not found.\n\n"
+                             "The installer puts it in\n"
+                             + places[1].getFullPathName() + "\n\n"
+                             "It can also be kept in the data folder:\n"
+                             + places.getLast().getFullPathName())
+                .withButton("OK")
+                .withAssociatedComponent(this),
+            [](int) {});
+    }
+
     void BasicEditor::onFirmwareMissing(SynthType type)
     {
         m_firmwareMissingLatch = true;
@@ -1184,6 +1227,19 @@ namespace retromulator
             m_entry.clear();
         if(m_flashTicks > 0)
             --m_flashTicks;
+
+        // The first start with a firmware takes seconds: meanwhile a panel says what is
+        // being done and how far it has come. It goes when the core is up.
+        const int firstStart = m_proc.m_isBooting.load() ? HeadlessProcessor::getMatrixFirstStartStage() : 0;
+        if(firstStart != 0)
+            m_startProgress.setProgress(firstStart == 1 ? StartProgressPanel::Stage::Calibrating : StartProgressPanel::Stage::ReadingBanks,
+                                        HeadlessProcessor::getMatrixFirstStartProgress());
+        if(m_startProgress.isVisible() != (firstStart != 0))
+        {
+            m_startProgress.setVisible(firstStart != 0);
+            if(firstStart != 0)
+                m_startProgress.toFront(false);
+        }
 
         if(++m_statusTicks >= kPanelTimerHz / 2)
         {
@@ -1505,6 +1561,7 @@ namespace retromulator
         m_background = rackPanel::createBackground(theme, { "Patch", "Bank", "Ready", "Boot", "No\nROM", "Error" });
         m_themeSwitch.setToggleState(theme == rackPanel::Theme::White, juce::dontSendNotification);
         m_aboutBtn.setTheme(theme);
+        m_manualBtn.setTheme(theme);
         m_editPanel.setTheme(theme);
         repaint();
     }

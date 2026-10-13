@@ -355,6 +355,11 @@ namespace retromulator
         // The patch as it sounds now: the loaded program with every edit applied. 134 bytes.
         bool getMatrixEditedPatch(uint8_t* data) const;
         bool hasMatrixPatchEdits() const;
+        // The first start of the Matrix core: 0 when none is running, 1 while the firmware
+        // calibrates the voices, 2 while the factory banks are read; and how much of the
+        // whole is done, 0 to 1.
+        static int getMatrixFirstStartStage();
+        static float getMatrixFirstStartProgress();
 
         // Overwrites one position of a bank file with the patch as it sounds, then loads the
         // bank and selects that position. The RAM bank is copied to Backup/ before its

@@ -590,6 +590,59 @@ namespace retromulator
         g.drawText("Click to close", getWidth() - 140, getHeight() - 22, 124, 14, juce::Justification::centredRight, false);
     }
 
+    void StartProgressPanel::setProgress(const Stage stage, const float fraction)
+    {
+        const float f = juce::jlimit(0.0f, 1.0f, fraction);
+        if(stage == m_stage && juce::approximatelyEqual(f, m_fraction))
+            return;
+        m_stage = stage;
+        m_fraction = f;
+        repaint();
+    }
+
+    void StartProgressPanel::paint(juce::Graphics& g)
+    {
+        g.fillAll(juce::Colours::black.withAlpha(0.62f));
+
+        const auto box = getLocalBounds().toFloat().withSizeKeepingCentre(470.0f, 112.0f);
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff1c1d20), 0.0f, box.getY(),
+                                               juce::Colour(0xff111214), 0.0f, box.getBottom(), false));
+        g.fillRoundedRectangle(box, 6.0f);
+        g.setColour(juce::Colour(0xff3a3d43));
+        g.drawRoundedRectangle(box.reduced(0.5f), 6.0f, 1.0f);
+
+        const float x = box.getX() + 22.0f, w = box.getWidth() - 44.0f;
+        g.setColour(juce::Colour(rackPanel::kLabelBlue));
+        g.fillRect(x, box.getY() + 14.0f, 150.0f, 3.5f);
+
+        g.setColour(juce::Colour(kLegendWhite));
+        g.setFont(sansFont(13.0f));
+        g.drawText("First start", juce::Rectangle<float>(x, box.getY() + 23.0f, w, 18.0f), juce::Justification::centredLeft, false);
+
+        g.setFont(sansFont(11.5f, false));
+        g.drawText(m_stage == Stage::Calibrating ? "The firmware is tuning its six voices..."
+                                                 : "Reading the factory patches from the patch EPROM...",
+                   juce::Rectangle<float>(x, box.getY() + 44.0f, w - 44.0f, 16.0f), juce::Justification::centredLeft, false);
+        g.drawText(juce::String(juce::roundToInt(m_fraction * 100.0f)) + " %",
+                   juce::Rectangle<float>(x, box.getY() + 44.0f, w, 16.0f), juce::Justification::centredRight, false);
+
+        const juce::Rectangle<float> track(x, box.getY() + 66.0f, w, 9.0f);
+        g.setColour(juce::Colour(0xff0a0b0c));
+        g.fillRoundedRectangle(track, 4.5f);
+        g.setColour(juce::Colour(0xff34373c));
+        g.drawRoundedRectangle(track.reduced(0.5f), 4.5f, 1.0f);
+        if(m_fraction > 0.0f)
+        {
+            g.setColour(juce::Colour(rackPanel::kLabelBlue));
+            g.fillRoundedRectangle(track.withWidth(juce::jmax(9.0f, track.getWidth() * m_fraction)).reduced(1.0f), 3.5f);
+        }
+
+        g.setColour(juce::Colour(0xffa8a8a8));
+        g.setFont(sansFont(10.5f, false));
+        g.drawText("This is done once: the next start is immediate.",
+                   juce::Rectangle<float>(x, box.getY() + 84.0f, w, 14.0f), juce::Justification::centredLeft, false);
+    }
+
     SevenSegmentDisplay::SevenSegmentDisplay()
     {
         setInterceptsMouseClicks(false, false);

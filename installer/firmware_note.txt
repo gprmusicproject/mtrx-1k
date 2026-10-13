@@ -1,0 +1,18 @@
+MTRX-1K - the firmware folder
+=============================
+
+MTRX-1K is an emulator: it contains no program and no sounds of the instrument.
+Both come from the firmware of the instrument itself, which you provide as files.
+
+Copy into this folder (Documents\GPR Music Project\MTRX-1K\ROM) your own copy of:
+
+  - the 32 KB system EPROM of the instrument, firmware version 1.20   (required)
+  - the 64 KB patch EPROM, for the factory patches of banks 2 to 9    (optional)
+
+Both are plain binary images with the extension .bin. They are recognised by
+their size and content, so their names do not matter.
+
+Then start MTRX-1K, or press Power on its panel if it is already open.
+
+The user manual explains the rest: press Manual on the panel of MTRX-1K, or open
+"MTRX-1K User Manual" from the Start menu.

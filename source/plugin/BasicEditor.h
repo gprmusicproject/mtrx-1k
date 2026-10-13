@@ -49,7 +49,11 @@ namespace retromulator
         PowerSwitch         m_power;
         ThemeSwitch         m_themeSwitch;
         LegendButton        m_aboutBtn { "About" };
+        // Opens the user manual.
+        LegendButton        m_manualBtn { "Manual" };
         AboutPanel          m_about;
+        // Shown while the core starts for the first time.
+        StartProgressPanel  m_startProgress;
         // Opens the patch editor under the panel.
         juce::TextButton    m_editBtn { "Edit" };
         EditPanel           m_editPanel;
@@ -105,6 +109,7 @@ namespace retromulator
         void startCore(SynthType type);
         void onCoreStarted(SynthType type);
         void onFirmwareMissing(SynthType type);
+        void openManual();
         void setTheme(rackPanel::Theme theme);
         void setEditOpen(bool open);
 

@@ -39,6 +39,8 @@ namespace retromulator
         static constexpr int kAboutY        = 6;
         static constexpr int kAboutW        = 33;
         static constexpr int kAboutH        = 13;
+        // Manual legend, under About
+        static constexpr int kManualY       = kAboutY + kAboutH + 3;
 
         // Panel finish switch, left of the Power legend
         static constexpr int kThemeSwitchX  = 878;
@@ -121,6 +123,24 @@ namespace retromulator
     public:
         VolumeKnob();
         void paint(juce::Graphics& g) override;
+    };
+
+    // Covers the editor while the first start of the core runs, which takes seconds: says
+    // what is being done and how far it has come. Clicks stop here, nothing under it can be
+    // used meanwhile.
+    class StartProgressPanel final : public juce::Component
+    {
+    public:
+        enum class Stage { Calibrating, ReadingBanks };
+
+        // fraction of the whole first start, 0 to 1
+        void setProgress(Stage stage, float fraction);
+
+        void paint(juce::Graphics& g) override;
+
+    private:
+        Stage m_stage = Stage::Calibrating;
+        float m_fraction = 0.0f;
     };
 
     // Covers the editor with the credits; a click anywhere but on the link closes it.

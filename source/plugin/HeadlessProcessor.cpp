@@ -3152,6 +3152,16 @@ namespace retromulator
         return true;
     }
 
+    int HeadlessProcessor::getMatrixFirstStartStage()
+    {
+        return static_cast<int>(matrixLib::Device::getFirstStartStage());
+    }
+
+    float HeadlessProcessor::getMatrixFirstStartProgress()
+    {
+        return matrixLib::Device::getFirstStartProgress();
+    }
+
     bool HeadlessProcessor::hasMatrixPatchEdits() const
     {
         return m_synthType == SynthType::Matrix && m_paramPool && m_paramPool->hasPatchEdits();

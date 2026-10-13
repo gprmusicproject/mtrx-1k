@@ -8,7 +8,7 @@ if(MSVC OR WIN32)
 	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-project(Retromulator VERSION 0.9.0 LANGUAGES C CXX)
+project(Retromulator VERSION 0.9.2 LANGUAGES C CXX)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 	set(CMAKE_BUILD_TYPE Release)
@@ -55,6 +55,8 @@ juce_add_plugin(Retromulator
 	PRODUCT_NAME                "MTRX-1K"
 	DESCRIPTION                 "Six voice analog synthesizer emulation"
 	BUNDLE_ID                   "com.gprmusicproject.mtrx1k"
+	# the maker's symbol: the icon of the standalone app and of its window
+	ICON_BIG                    "${CMAKE_CURRENT_LIST_DIR}/Assets/Icon/MTRX-1K.png"
 
 	IS_SYNTH                    TRUE
 	NEEDS_MIDI_INPUT            TRUE
