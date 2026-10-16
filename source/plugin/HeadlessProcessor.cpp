@@ -775,7 +775,10 @@ namespace retromulator
                 else if(type == SynthType::SID)
                     juce::File(getSynthDataFolder(SynthType::SID)).createDirectory();
                 else if(type == SynthType::Matrix)
+                {
                     applyMatrixLfoSync();
+                    applyMatrixVoices();
+                }
                 else if(type == SynthType::Ayumi)
                 {
                     // Two banks: Factory (read-only presets) and User (imports).
@@ -927,7 +930,10 @@ namespace retromulator
                 else if(type == SynthType::SID)
                     juce::File(getSynthDataFolder(SynthType::SID)).createDirectory();
                 else if(type == SynthType::Matrix)
+                {
                     applyMatrixLfoSync();
+                    applyMatrixVoices();
+                }
                 else if(type == SynthType::Ayumi)
                 {
                     // Two banks: Factory (read-only presets) and User (imports).
@@ -3009,6 +3015,23 @@ namespace retromulator
         }
     }
 
+    // ── Matrix polyphony ────────────────────────────────────────────────────
+
+    void HeadlessProcessor::setMatrixVoices(const int voices)
+    {
+        const int v = voices >= 24 ? 24 : (voices >= 12 ? 12 : 6);
+        if(v == m_matrixVoices)
+            return;
+        m_matrixVoices = v;
+        applyMatrixVoices();
+    }
+
+    void HeadlessProcessor::applyMatrixVoices()
+    {
+        if(auto* dev = getMatrixDevice())
+            dev->setVoiceCount(static_cast<uint32_t>(m_matrixVoices));
+    }
+
     // ── Matrix patch editing ──────────────────────────────────────────────────
 
     namespace
@@ -4437,6 +4460,9 @@ namespace retromulator
     // "TRKO": tracker options, a bit field. 1 = stop at end, 2 = shuffle.
     static constexpr int32_t kTrackerOptionsMagic = 0x4F4B5254;
     static constexpr int32_t kMatrixLfoSyncMagic = 0x534C584D;   // 'MXLS'
+    // 'MXVC': the voices, 6, 12 or 24. Just before 'MXLS', so read from the tail as well; a
+    // version that does not know it reads past it.
+    static constexpr int32_t kMatrixVoicesMagic = 0x4356584D;
     // 'MXED': the patch editor, a bit field. 1 = open, 2 = the sound is the initialised patch.
     static constexpr int32_t kMatrixEditorMagic = 0x4445584D;
     // 'MXML': the controller assignments of the MIDI learn in use, as text.
@@ -4615,9 +4641,11 @@ namespace retromulator
             appendInt32(destData, (m_trackerStopAtEnd ? 1 : 0) | (m_trackerShuffle ? 2 : 0));
         }
 
-        // ['MXLS':int32][lfo1 division:int32][lfo2 division:int32]
+        // ['MXVC':int32][voices:int32] ['MXLS':int32][lfo1 division:int32][lfo2 division:int32]
         if(m_synthType == SynthType::Matrix)
         {
+            appendInt32(destData, kMatrixVoicesMagic);
+            appendInt32(destData, m_matrixVoices);
             appendInt32(destData, kMatrixLfoSyncMagic);
             appendInt32(destData, m_matrixLfoSync[0]);
             appendInt32(destData, m_matrixLfoSync[1]);
@@ -4730,11 +4758,25 @@ namespace retromulator
                 m_matrixLfoSync[0] = lfo1;
                 m_matrixLfoSync[1] = lfo2;
             }
+
+            // the voices before it; a session saved without them had one instrument
+            m_matrixVoices = 6;
+            int32_t voicesMagic = 0, voices = 0;
+            if(magic == kMatrixLfoSyncMagic && sizeInBytes >= 20)
+            {
+                std::memcpy(&voicesMagic, bytes + sizeInBytes - 20, 4);
+                std::memcpy(&voices, bytes + sizeInBytes - 16, 4);
+                if(voicesMagic == kMatrixVoicesMagic && (voices == 6 || voices == 12 || voices == 24))
+                    m_matrixVoices = voices;
+            }
         }
 
         setSynthType(newType, romPath);
         if(newType == SynthType::Matrix)
+        {
             applyMatrixLfoSync();
+            applyMatrixVoices();
+        }
 
         if(newType == SynthType::AkaiS1000)
         {

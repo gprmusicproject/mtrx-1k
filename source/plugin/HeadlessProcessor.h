@@ -340,6 +340,12 @@ namespace retromulator
         bool hasMatrixHostTempo() const;
         bool isMatrixLfoDivisionReachable(int division) const;
 
+        // ── Matrix polyphony ───────────────────────────────────────────────
+        // 6, 12 or 24 voices: one, two or four instruments with the same firmware, see
+        // matrixLib::Device::setVoiceCount. A setting of this instance, saved with it.
+        int  getMatrixVoices() const { return m_matrixVoices; }
+        void setMatrixVoices(int voices);
+
         // ── Matrix patch editing ───────────────────────────────────────────
         static constexpr int kMatrixRamSlots  = 200;   // patches 000 to 199 of the instrument
         static constexpr int kMatrixBankSlots = 100;   // a bank created from the editor
@@ -604,6 +610,8 @@ namespace retromulator
         bool                 m_trackerTempoSync = false;
         int                  m_matrixLfoSync[2] = {0, 0};
         void applyMatrixLfoSync();
+        int                  m_matrixVoices = 6;
+        void applyMatrixVoices();
         bool                 m_trackerStopAtEnd = false;
         bool                 m_trackerShuffle = false;
         void reloadTrackerModule();

@@ -13,6 +13,21 @@
 #include <filesystem>
 #include <fstream>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+#if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
+#include <xmmintrin.h>
+#define MATRIXLIB_FP_X86 1
+#endif
+
 namespace matrixLib
 {
 	namespace
@@ -41,6 +56,39 @@ namespace matrixLib
 		constexpr float RebuildSeconds = 1.0f;      // without an edit before the precautionary rebuild
 		constexpr float BusSeconds = 0.16f;         // after a matrix bus message before anything else is sent
 		constexpr float PatchLoadSeconds = 0.15f;
+		// an instrument that joins gets the edit buffer, 23 ms on the UART, and loads it
+		constexpr float JoinSeconds = 0.2f;
+
+		// The floating point mode of the calling thread. Hosts set theirs to flush denormal
+		// numbers to zero; a thread of the device's own has to be told, or a filter that dies
+		// away runs at a fraction of the speed.
+		uint64_t fpMode()
+		{
+#if defined(MATRIXLIB_FP_X86)
+			return _mm_getcsr();
+#elif defined(__aarch64__)
+			uint64_t r;
+			__asm__ volatile("mrs %0, fpcr" : "=r"(r));
+			return r;
+#else
+			return 0;
+#endif
+		}
+
+		void setFpMode(const uint64_t _mode)
+		{
+#if defined(MATRIXLIB_FP_X86)
+			_mm_setcsr(static_cast<unsigned int>(_mode));
+#elif defined(__aarch64__)
+			__asm__ volatile("msr fpcr, %0" : : "r"(_mode));
+#else
+			(void)_mode;
+#endif
+		}
+
+		constexpr uint8_t KeyboardModeParam = 48;
+		constexpr int8_t KeyboardUnison = 2;
+		constexpr size_t MaxHeldNotes = 256;
 
 		// continuous messages that only need their latest value per block
 		uint32_t coalesceKey(const synthLib::SMidiEvent& _ev)
@@ -196,6 +244,16 @@ namespace matrixLib
 		g_firstStartStage.store(static_cast<uint8_t>(FirstStartStage::None));
 
 		m_machine.getHardware().getAcia().setCyclesPerByte(UartCyclesPerByte);
+
+		// nothing the audio thread does with them later has to allocate
+		m_extras.reserve(MaxMachines - 1);
+		m_retired.reserve(MaxMachines - 1);
+		m_held.reserve(MaxHeldNotes + 1);
+		for(auto& lane : m_lanes)
+		{
+			lane.events.reserve(512);
+			lane.bytes.reserve(8192);
+		}
 	}
 
 	Device::FirstStartStage Device::getFirstStartStage()
@@ -222,7 +280,14 @@ namespace matrixLib
 		return false;
 	}
 
-	Device::~Device() = default;
+	Device::~Device()
+	{
+		m_quit.store(true);
+		for(auto& go : m_go)
+			go.release();
+		for(auto& t : m_workers)
+			t.join();
+	}
 
 	void Device::getSupportedSamplerates(std::vector<float>& _dst) const
 	{
@@ -237,17 +302,24 @@ namespace matrixLib
 		if(!synthLib::Device::setSamplerate(_samplerate))
 			return false;
 		m_machine.setSamplerate(_samplerate);
+		for(auto& e : m_extras)
+			e.machine->setSamplerate(_samplerate);
 		return true;
 	}
 
 	void Device::runSeconds(const float _seconds)
 	{
+		run(m_machine, _seconds);
+	}
+
+	void Device::run(Machine& _machine, const float _seconds)
+	{
 		std::vector<float> buf(512);
-		auto remaining = static_cast<size_t>(_seconds * m_machine.getSamplerate());
+		auto remaining = static_cast<size_t>(_seconds * _machine.getSamplerate());
 		while(remaining)
 		{
 			const auto n = std::min(remaining, buf.size());
-			m_machine.render(buf.data(), n);
+			_machine.render(buf.data(), n);
 			remaining -= n;
 		}
 	}
@@ -298,6 +370,8 @@ namespace matrixLib
 		m_machine.setSamplerate(BootRate);
 
 		const bool warm = loadSnapshot();
+		if(warm)
+			m_bootSram = m_machine.getHardware().getSram();
 		m_machine.reset();
 
 		if(warm)
@@ -327,6 +401,7 @@ namespace matrixLib
 		runSeconds(1.0f);
 
 		primeVoices();
+		m_bootSram = m_machine.getHardware().getSram();
 		saveSnapshot();
 		selectFirstProgram();
 		firstStart(FirstStartStage::Calibrating, 1.0f);
@@ -534,6 +609,332 @@ namespace matrixLib
 		}
 	}
 
+	void Device::setVoiceCount(const uint32_t _voices)
+	{
+		if(!m_valid)
+			return;
+		const uint32_t machines = _voices >= 4 * VoicesPerMachine ? 4 : (_voices >= 2 * VoicesPerMachine ? 2 : 1);
+		if(machines > 1)
+			startWorkers();
+		m_machineTarget.store(machines);
+
+		// The audio thread holds the instruments it plays. What it left is freed here, spares
+		// it will not need go too, and what it lacks is built.
+		{
+			std::lock_guard<std::mutex> lock(m_poolMutex);
+			m_retired.clear();
+			while(!m_spare.empty() && m_extras.size() + m_spare.size() + 1 > machines)
+				m_spare.pop_back();
+		}
+		for(;;)
+		{
+			uint32_t index;
+			{
+				std::lock_guard<std::mutex> lock(m_poolMutex);
+				if(m_extras.size() + m_spare.size() + 1 >= machines)
+					break;
+				index = ++m_built;
+			}
+			auto machine = createExtra(index);
+			if(!machine)
+				break;
+			std::lock_guard<std::mutex> lock(m_poolMutex);
+			m_spare.push_back(std::move(machine));
+		}
+		m_poolChanged.store(true);
+	}
+
+	// Another instrument from the same firmware, patch EPROM and calibrated memory: the state
+	// the first one is in after a warm start.
+	std::unique_ptr<Machine> Device::createExtra(const uint32_t _index) const
+	{
+		const auto& rom = getDeviceCreateParams().romData;
+		if(m_bootSram.empty() || rom.size() < 0x8000)
+			return {};
+
+		auto machine = std::make_unique<Machine>();
+		if(!machine->setFirmware(std::vector<uint8_t>(rom.begin(), rom.begin() + 0x8000)))
+			return {};
+		if(m_hasPatchRom)
+			machine->setPatchRom(std::vector<uint8_t>(rom.begin() + 0x8000, rom.begin() + 0x18000));
+
+		auto& sram = machine->getHardware().getSram();
+		if(sram.size() != m_bootSram.size())
+			return {};
+		std::copy(m_bootSram.begin(), m_bootSram.end(), sram.begin());
+
+		machine->setSamplerate(BootRate);
+		machine->reset();
+		// separate instruments do not share a noise source
+		machine->setNoiseSeed(0x12345678u ^ (0x9e3779b9u * _index));
+		run(*machine, 1.0f);
+
+		// the program change of selectFirstProgram
+		auto& hw = machine->getHardware();
+		hw.midiIn(0xc0);
+		hw.midiIn(0x00);
+		run(*machine, 0.3f);
+
+		hw.getAcia().setCyclesPerByte(UartCyclesPerByte);
+		return machine;
+	}
+
+	void Device::takeExtras()
+	{
+		if(!m_poolChanged.load())
+			return;
+		std::unique_lock<std::mutex> lock(m_poolMutex, std::try_to_lock);
+		if(!lock.owns_lock())
+			return;
+
+		const uint32_t want = m_machineTarget.load() - 1;
+		while(m_extras.size() > want)
+			dropExtra();
+
+		while(m_extras.size() < want && !m_spare.empty())
+		{
+			Extra e;
+			e.machine = std::move(m_spare.back());
+			m_spare.pop_back();
+			auto& machine = *e.machine;
+			machine.setSamplerate(m_machine.getSamplerate());
+
+			// the patch that plays and the pedals that are down
+			auto& hw = machine.getHardware();
+			if(m_editBuffer.size() == patch::DataSize)
+			{
+				patch::Data data;
+				std::copy(m_editBuffer.begin(), m_editBuffer.end(), data.begin());
+				for(const auto b : patch::encode(data, patch::OpEditBuffer, 0))
+					hw.midiIn(b);
+			}
+			for(uint8_t ch = 0; ch < 16; ++ch)
+			{
+				if(m_pedalDown & (1u << ch))
+				{
+					hw.midiIn(static_cast<uint8_t>(0xb0 | ch));
+					hw.midiIn(64);
+					hw.midiIn(127);
+				}
+			}
+			e.readyIn = static_cast<uint32_t>(machine.getSamplerate() * JoinSeconds);
+			m_extras.push_back(std::move(e));
+		}
+		m_poolChanged.store(m_extras.size() != want);
+	}
+
+	// the last one stops at once, with the notes it held
+	void Device::dropExtra()
+	{
+		const auto index = static_cast<uint8_t>(m_extras.size());
+		m_held.erase(std::remove_if(m_held.begin(), m_held.end(), [index](const HeldNote& _h) { return _h.machine == index; }), m_held.end());
+		m_retired.push_back(std::move(m_extras.back().machine));
+		m_extras.pop_back();
+	}
+
+	void Device::midiInAll(const uint8_t _byte)
+	{
+		m_machine.getHardware().midiIn(_byte);
+		for(auto& e : m_extras)
+			e.machine->getHardware().midiIn(_byte);
+	}
+
+	// one thread for each extra that can be, started once, before the first extra plays
+	void Device::startWorkers()
+	{
+		std::lock_guard<std::mutex> lock(m_poolMutex);
+		if(!m_workers.empty())
+			return;
+		for(uint32_t i = 0; i < MaxMachines - 1; ++i)
+		{
+			m_workers.emplace_back([this, i] { workerLoop(i); });
+#ifdef _WIN32
+			// they render audio for the audio thread, which waits for them
+			SetThreadPriority(m_workers.back().native_handle(), THREAD_PRIORITY_TIME_CRITICAL);
+#endif
+		}
+	}
+
+	void Device::workerLoop(const uint32_t _index)
+	{
+#ifdef _WIN32
+		// An audio thread to Windows, as those of the host are: scheduled ahead of others and
+		// kept off the slow cores and the power saving of a hybrid processor.
+		if(const auto avrt = LoadLibraryW(L"avrt.dll"))
+		{
+			using SetCharacteristics = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+			if(const auto set = reinterpret_cast<SetCharacteristics>(reinterpret_cast<void*>(GetProcAddress(avrt, "AvSetMmThreadCharacteristicsW"))))
+			{
+				DWORD task = 0;
+				set(L"Pro Audio", &task);
+			}
+		}
+		THREAD_POWER_THROTTLING_STATE throttling{};
+		throttling.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
+		throttling.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+		throttling.StateMask = 0;
+		SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &throttling, sizeof(throttling));
+
+		// On a processor with performance and efficient cores, the performance ones: an
+		// instrument rendered on an efficient core takes twice as long, and the audio thread
+		// waits for it.
+		ULONG length = 0;
+		GetSystemCpuSetInformation(nullptr, 0, &length, GetCurrentProcess(), 0);
+		std::vector<uint8_t> info(length);
+		if(length && GetSystemCpuSetInformation(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(info.data()), length, &length, GetCurrentProcess(), 0))
+		{
+			std::vector<ULONG> fast;
+			BYTE best = 0, worst = 255;
+			for(ULONG at = 0; at < length;)
+			{
+				const auto* set = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(info.data() + at);
+				if(set->Type == CpuSetInformation)
+				{
+					best = std::max(best, set->CpuSet.EfficiencyClass);
+					worst = std::min(worst, set->CpuSet.EfficiencyClass);
+				}
+				at += set->Size;
+			}
+			for(ULONG at = 0; best != worst && at < length;)
+			{
+				const auto* set = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(info.data() + at);
+				if(set->Type == CpuSetInformation && set->CpuSet.EfficiencyClass == best)
+					fast.push_back(set->CpuSet.Id);
+				at += set->Size;
+			}
+			if(!fast.empty())
+				SetThreadSelectedCpuSets(GetCurrentThread(), fast.data(), static_cast<ULONG>(fast.size()));
+		}
+#endif
+		for(;;)
+		{
+			m_go[_index].acquire();
+			if(m_quit.load())
+				return;
+			// the audio thread may have taken it already
+			if(!m_taken[_index + 1].exchange(true))
+			{
+				const auto mode = m_fpMode;
+				if(fpMode() != mode)
+					setFpMode(mode);
+				renderLane(m_lanes[_index + 1], m_laneSamples);
+			}
+			m_done.release();
+		}
+	}
+
+	void Device::emit(const int _machine, const uint8_t* _data, const size_t _count)
+	{
+		const uint32_t from = _machine < 0 ? 0 : static_cast<uint32_t>(_machine);
+		const uint32_t to = _machine < 0 ? machineCount() : from + 1;
+		for(uint32_t i = from; i < to; ++i)
+		{
+			auto& lane = m_lanes[i];
+			lane.events.push_back({m_emitOffset, static_cast<uint32_t>(lane.bytes.size()), static_cast<uint32_t>(_count), -1});
+			lane.bytes.insert(lane.bytes.end(), _data, _data + _count);
+		}
+	}
+
+	void Device::emitExpect(const uint32_t _machine, const bool _dco1, const bool _dco2)
+	{
+		m_lanes[_machine].events.push_back({m_emitOffset, 0, 0, static_cast<int8_t>((_dco1 ? 1 : 0) | (_dco2 ? 2 : 0))});
+	}
+
+	// renders a block, handing each event to the firmware at its sample
+	void Device::renderLane(Lane& _lane, const size_t _samples)
+	{
+		auto& machine = *_lane.machine;
+		auto& hw = machine.getHardware();
+		size_t pos = 0;
+		for(const auto& e : _lane.events)
+		{
+			const size_t at = std::min<size_t>(e.offset, _samples);
+			if(at > pos)
+			{
+				machine.render(_lane.out + pos, at - pos);
+				pos = at;
+			}
+			if(e.expect >= 0)
+				machine.expectNote((e.expect & 1) != 0, (e.expect & 2) != 0);
+			for(uint32_t i = 0; i < e.count; ++i)
+				hw.midiIn(_lane.bytes[e.first + i]);
+		}
+		if(pos < _samples)
+			machine.render(_lane.out + pos, _samples - pos);
+	}
+
+	uint32_t Device::noteOn(const uint8_t _channel, const uint8_t _note)
+	{
+		// struck again before its note off: where it sounds
+		for(auto& h : m_held)
+		{
+			if(h.channel == _channel && h.note == _note)
+			{
+				h.sustained = false;
+				m_lastNoteOn[h.machine] = ++m_noteCount;
+				return h.machine;
+			}
+		}
+
+		uint32_t pick = 0;
+		const bool unison = m_paramsKnown && m_paramValue[KeyboardModeParam] == KeyboardUnison;
+		if(!unison)
+		{
+			size_t fewest = ~size_t(0);
+			for(uint32_t m = 0; m < machineCount(); ++m)
+			{
+				if(m && m_extras[m - 1].readyIn)
+					continue;
+				const auto count = static_cast<size_t>(std::count_if(m_held.begin(), m_held.end(), [m](const HeldNote& _h) { return _h.machine == m; }));
+				if(count < fewest || (count == fewest && m_lastNoteOn[m] < m_lastNoteOn[pick]))
+				{
+					fewest = count;
+					pick = m;
+				}
+			}
+		}
+
+		// note offs that never came must not pile up
+		if(m_held.size() >= MaxHeldNotes)
+			m_held.erase(m_held.begin());
+		m_held.push_back({_channel, _note, static_cast<uint8_t>(pick), false});
+		m_lastNoteOn[pick] = ++m_noteCount;
+		return pick;
+	}
+
+	// the instrument that plays the note, -1 when none is known to
+	int Device::noteOff(const uint8_t _channel, const uint8_t _note)
+	{
+		for(auto it = m_held.begin(); it != m_held.end(); ++it)
+		{
+			if(it->channel != _channel || it->note != _note)
+				continue;
+			const int machine = it->machine;
+			if(m_pedalDown & (1u << _channel))
+				it->sustained = true;
+			else
+				m_held.erase(it);
+			return machine;
+		}
+		return -1;
+	}
+
+	void Device::pedal(const uint8_t _channel, const bool _down)
+	{
+		if(_down)
+		{
+			m_pedalDown = static_cast<uint16_t>(m_pedalDown | (1u << _channel));
+			return;
+		}
+		m_pedalDown = static_cast<uint16_t>(m_pedalDown & ~(1u << _channel));
+		m_held.erase(std::remove_if(m_held.begin(), m_held.end(), [_channel](const HeldNote& _h) { return _h.channel == _channel && _h.sustained; }), m_held.end());
+	}
+
+	void Device::forgetNotes(const uint8_t _channel)
+	{
+		m_held.erase(std::remove_if(m_held.begin(), m_held.end(), [_channel](const HeldNote& _h) { return _h.channel == _channel; }), m_held.end());
+	}
+
 	void Device::queueEdit(const std::vector<uint8_t>& _sysex)
 	{
 		if(_sysex[3] == patch::OpMatrixParameter && _sysex.size() >= 9 && _sysex[4] == patch::MatrixBusCount - 1)
@@ -584,8 +985,25 @@ namespace matrixLib
 		const auto message = m_editQueue.front();
 		m_editQueue.erase(m_editQueue.begin());
 		for(const auto b : message)
-			hw.midiIn(b);
+			midiInAll(b);
 		m_editHold = static_cast<uint32_t>(m_machine.getSamplerate() * EditSeconds);
+
+		// what the firmware has now, for an instrument that joins later
+		if(m_editBuffer.size() == patch::DataSize)
+		{
+			if(message[3] == patch::OpMatrixParameter && message.size() >= 9 && message[4] < patch::MatrixBusCount)
+			{
+				auto* bus = &m_editBuffer[patch::MatrixOffset + message[4] * 3];
+				bus[0] = message[5];
+				bus[1] = static_cast<uint8_t>(static_cast<int8_t>(message[6] << 1) >> 1);   // 7 bit two's complement
+				bus[2] = message[7];
+			}
+			else if(message[3] == patch::OpParameter && message.size() >= 7)
+			{
+				if(const auto* p = patch::findParam(message[4]))
+					m_editBuffer[p->byte] = static_cast<uint8_t>(static_cast<int8_t>(message[5] << 1) >> 1);
+			}
+		}
 
 		if(message[3] == patch::OpMatrixParameter)
 		{
@@ -598,7 +1016,8 @@ namespace matrixLib
 			// the notes that sound take the new amount in one leap then: on the filter and the
 			// pulse widths it is drawn out until the next message can go
 			const float rate = m_machine.getSamplerate();
-			hw.expectEdit(static_cast<uint32_t>(rate * 0.03f), static_cast<uint32_t>(rate * 0.25f), static_cast<uint32_t>(rate * BusSeconds));
+			for(uint32_t i = 0; i < machineCount(); ++i)
+				machineAt(i).getHardware().expectEdit(static_cast<uint32_t>(rate * 0.03f), static_cast<uint32_t>(rate * 0.25f), static_cast<uint32_t>(rate * BusSeconds));
 			return;
 		}
 
@@ -674,8 +1093,6 @@ namespace matrixLib
 
 	void Device::pushMidi(const synthLib::SMidiEvent& _ev)
 	{
-		auto& hw = m_machine.getHardware();
-
 		if(!_ev.sysex.empty())
 		{
 			const bool matrix = _ev.sysex.size() > 5 && _ev.sysex[1] == patch::IdOberheim && _ev.sysex[2] == patch::IdMatrix;
@@ -709,8 +1126,7 @@ namespace matrixLib
 			}
 			else
 			{
-				for(const auto b : sx)
-					hw.midiIn(b);
+				emit(-1, sx.data(), sx.size());
 				if(matrix && (sx[3] == patch::OpEditBuffer || sx[3] == patch::OpSinglePatch))
 				{
 					// edits still waiting were meant for the patch this one replaces
@@ -724,8 +1140,10 @@ namespace matrixLib
 				if(sx[3] == patch::OpEditBuffer)
 				{
 					m_paramsKnown = false;
+					m_editBuffer.clear();
 					if(const auto data = patch::decode(sx))
 					{
+						m_editBuffer.assign(data->begin(), data->end());
 						for(uint8_t n = 0; n < m_paramValue.size(); ++n)
 							if(const auto* p = patch::findParam(n))
 								m_paramValue[n] = static_cast<int8_t>((*data)[p->byte]);
@@ -763,38 +1181,48 @@ namespace matrixLib
 		if((status & 0xf0) == 0xc0)
 			return;
 
+		const uint8_t bytes[3] = {status, static_cast<uint8_t>(_ev.b & 0x7f), static_cast<uint8_t>(_ev.c & 0x7f)};
+		size_t length = 3;
+		const uint8_t type = status & 0xf0;
+		const uint8_t channel = status & 0x0f;
+		if(type == 0xd0)
+			length = 2;
+		else if(type == 0xf0)
+			length = (status == 0xf1 || status == 0xf3) ? 2 : (status == 0xf2 ? 3 : 1);
+
+		// a note goes to one instrument, everything else to all of them
+		int target = -1;
+		if(type == 0x90 && bytes[2])
+			target = static_cast<int>(noteOn(channel, bytes[1]));
+		else if(type == 0x80 || type == 0x90)
+			target = noteOff(channel, bytes[1]);
+		else if(type == 0xb0)
+		{
+			if(bytes[1] == 64)
+				pedal(channel, bytes[2] >= 64);
+			else if(bytes[1] == 121)
+				pedal(channel, false);
+			else if(bytes[1] == 120 || bytes[1] == 123)
+				forgetNotes(channel);
+		}
+
 		// The pitch the firmware writes next for a resting voice is this note, see Machine.
 		// Not for an oscillator with portamento: its first step is the start of a glide.
-		if((status & 0xf0) == 0x90 && (_ev.c & 0x7f) && m_paramsKnown)
-			m_machine.expectNote(m_paramValue[Dco1PortaParam] == 0, m_paramValue[Dco2KeyboardParam] != 1);
+		if(type == 0x90 && bytes[2] && m_paramsKnown)
+			emitExpect(static_cast<uint32_t>(target), m_paramValue[Dco1PortaParam] == 0, m_paramValue[Dco2KeyboardParam] != 1);
 
-		hw.midiIn(status);
-		switch(status & 0xf0)
-		{
-		case 0xc0:
-		case 0xd0:
-			hw.midiIn(_ev.b & 0x7f);
-			break;
-		case 0xf0:
-			if(status == 0xf1 || status == 0xf3)
-				hw.midiIn(_ev.b & 0x7f);
-			else if(status == 0xf2)
-			{
-				hw.midiIn(_ev.b & 0x7f);
-				hw.midiIn(_ev.c & 0x7f);
-			}
-			break;
-		default:
-			hw.midiIn(_ev.b & 0x7f);
-			hw.midiIn(_ev.c & 0x7f);
-			break;
-		}
+		emit(target, bytes, length);
 	}
 
 	void Device::processAudio(const synthLib::TAudioInputs&, const synthLib::TAudioOutputs& _outputs, const size_t _samples)
 	{
+		takeExtras();
+
 		if(m_mono.size() < _samples)
 			m_mono.resize(_samples);
+		for(size_t i = 0; i < m_extras.size(); ++i)
+			if(m_extraOut[i].size() < _samples)
+				m_extraOut[i].resize(_samples);
 
 		feedEdits(_samples);
 
@@ -816,23 +1244,48 @@ namespace matrixLib
 			}
 		}
 
-		size_t pos = 0;
-		size_t ev = 0;
-		while(pos < _samples)
+		// who gets what, and at which sample
+		const uint32_t count = machineCount();
+		for(uint32_t i = 0; i < count; ++i)
 		{
-			while(ev < m_pending.size() && m_pending[ev].offset <= pos)
-				pushMidi(m_pending[ev++].event);
-
-			size_t end = _samples;
-			if(ev < m_pending.size())
-				end = std::min<size_t>(end, std::max<size_t>(m_pending[ev].offset, pos + 1));
-
-			m_machine.render(m_mono.data() + pos, end - pos);
-			pos = end;
+			auto& lane = m_lanes[i];
+			lane.machine = &machineAt(i);
+			lane.out = i ? m_extraOut[i - 1].data() : m_mono.data();
+			lane.events.clear();
+			lane.bytes.clear();
 		}
-		while(ev < m_pending.size())
-			pushMidi(m_pending[ev++].event);
+		for(const auto& p : m_pending)
+		{
+			m_emitOffset = static_cast<uint32_t>(std::min<size_t>(p.offset, _samples));
+			pushMidi(p.event);
+		}
 		m_pending.clear();
+
+		// the extras on their threads, the first one here
+		// Done with its own, the audio thread takes any that a worker has not started yet: one
+		// that is slow to wake costs no more than the rendering itself.
+		m_laneSamples = _samples;
+		m_fpMode = fpMode();
+		for(uint32_t i = 1; i < count; ++i)
+		{
+			m_taken[i].store(false);
+			m_go[i - 1].release();
+		}
+		renderLane(m_lanes[0], _samples);
+		for(uint32_t i = 1; i < count; ++i)
+			if(!m_taken[i].exchange(true))
+				renderLane(m_lanes[i], _samples);
+		for(uint32_t i = 1; i < count; ++i)
+			m_done.acquire();
+		for(uint32_t i = 1; i < count; ++i)
+		{
+			const float* extra = m_extraOut[i - 1].data();
+			for(size_t s = 0; s < _samples; ++s)
+				m_mono[s] += extra[s];
+		}
+
+		for(auto& e : m_extras)
+			e.readyIn = e.readyIn > _samples ? e.readyIn - static_cast<uint32_t>(_samples) : 0;
 
 		m_sampleTime += _samples;
 		if(m_lastClock && m_sampleTime - m_lastClock > static_cast<uint64_t>(m_machine.getSamplerate()))
@@ -908,6 +1361,13 @@ namespace matrixLib
 		m_machine.getHardware().midiOut(m_txBytes);
 		for(const auto b : m_txBytes)
 			parseMidiOut(b);
+
+		// the others answer too, and nobody listens
+		for(auto& e : m_extras)
+		{
+			m_drain.clear();
+			e.machine->getHardware().midiOut(m_drain);
+		}
 
 		_midiOut.insert(_midiOut.end(), m_midiOut.begin(), m_midiOut.end());
 		m_midiOut.clear();

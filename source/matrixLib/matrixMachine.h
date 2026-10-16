@@ -35,6 +35,9 @@ namespace matrixLib
 		// One flag per oscillator: false leaves it joined, for one that glides to its notes.
 		void expectNote(bool _dco1, bool _dco2);
 
+		// the noise source starts from this, so that two machines do not play the same noise
+		void setNoiseSeed(uint32_t _seed) { m_noiseState = _seed ? _seed : 0x12345678u; }
+
 		std::function<void(float)> onComparatorSample;   // debugging
 		// debugging: the height in volts of the ramp converter A of a voice is asked for
 		float getRampPeak(uint32_t _voice) const { return m_rampPeak[_voice]; }

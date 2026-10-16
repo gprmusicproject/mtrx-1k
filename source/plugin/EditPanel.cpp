@@ -609,6 +609,65 @@ namespace retromulator
             }
         };
 
+        // The voices: one Matrix-1000, or two or four of them chained. Not a patch parameter
+        // but a setting of the instance, so it stays when the sound changes.
+        class VoicesChoice final : public EditPanel::Control
+        {
+        public:
+            explicit VoicesChoice(EditPanel::Context& context) : Control(context)
+            {
+                setTitle("Voices");
+            }
+
+            void refresh() override
+            {
+                const int v = ctx.proc.getMatrixVoices();
+                if(v != m_shown)
+                {
+                    m_shown = v;
+                    repaint();
+                }
+            }
+
+            void paint(juce::Graphics& g) override
+            {
+                auto b = getLocalBounds();
+                g.setColour(juce::Colour(style().label));
+                g.setFont(sans(9.5f));
+                g.drawFittedText("Voices", b.removeFromTop(kLabelHeight), juce::Justification::centred, 1, 0.7f);
+                drawBox(g, style(), b.withTrimmedTop(2).toFloat(), juce::String(ctx.proc.getMatrixVoices()), true, true);
+            }
+
+            void mouseDown(const juce::MouseEvent&) override
+            {
+                const int current = ctx.proc.getMatrixVoices();
+                showMenu(*this, {"6", "12", "24"}, current >= 24 ? 2 : (current >= 12 ? 1 : 0), [this](const int picked)
+                {
+                    set(picked == 2 ? 24 : (picked == 1 ? 12 : 6));
+                });
+            }
+
+            void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
+            {
+                if(wheel.deltaY == 0.0f)
+                    return;
+                const int current = ctx.proc.getMatrixVoices();
+                if(wheel.deltaY > 0.0f)
+                    set(current >= 24 ? 12 : 6);
+                else
+                    set(current <= 6 ? 12 : 24);
+            }
+
+        private:
+            void set(const int voices)
+            {
+                ctx.proc.setMatrixVoices(voices);
+                refresh();
+            }
+
+            int m_shown = -1;
+        };
+
         // Curve drawn from several parameters, in a window like the display's.
         class Graph : public EditPanel::Control
         {
@@ -1796,7 +1855,9 @@ namespace retromulator
         {
             const auto at = section("RAMP / PORTAMENTO / KEYBOARD", kRightX, rowC, kRightWidth, kLastRowHeight);
             knobs(at, {{40, "Ramp 1"}, {42, "Ramp 2"}, {44, "Porta"}, {45, "< Velocity"}});
-            toggle(47, "Legato", at.x + 4 * kKnobWidth + 14, at.y + 10);
+            toggle(47, "Legato", at.x + 4 * kKnobWidth + 4, at.y + 10);
+            // above the keyboard mode
+            add(std::make_unique<VoicesChoice>(ctx), {at.x + 5 * kKnobWidth - 4, at.y + 10, kRightX + kRightWidth - 8 - (at.x + 5 * kKnobWidth - 4), kChoiceHeight});
             choices(at.translated(0, kKnobRow), {{41, "Ramp 1 Trig", 66}, {43, "Ramp 2 Trig", 66}, {46, "Porta Mode", 70}, {48, "Keyboard", 68}});
         }
     }

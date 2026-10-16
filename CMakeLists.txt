@@ -8,7 +8,7 @@ if(MSVC OR WIN32)
 	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-project(Retromulator VERSION 0.9.2 LANGUAGES C CXX)
+project(Retromulator VERSION 0.9.3 LANGUAGES C CXX)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 	set(CMAKE_BUILD_TYPE Release)
