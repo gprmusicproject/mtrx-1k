@@ -29,9 +29,9 @@
       "Wave",
       "Both",
       "Noise",
-      "Noise+Pulse",
-      "Noise+Wave",
-      "Noise+Both"
+      "Noise",
+      "Noise",
+      "Noise"
     ],
     "vl_keyb": [
       "Off",

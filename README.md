@@ -26,7 +26,7 @@ Where the original moves a pitch or a control voltage in audible steps, about 75
 
 ## Status
 
-Version 0.9.4, October 2026. Built and tested on Windows 11 as a VST3 in Cubase 15 and as a standalone app. The build files for other systems come from Retromulator and have not been tried with this version.
+Version 0.9.5, October 2026. Built and tested on Windows 11 as a VST3 in Cubase 15 and as a standalone app. The build files for other systems come from Retromulator and have not been tried with this version.
 
 ## Firmware
 

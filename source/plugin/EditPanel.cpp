@@ -566,7 +566,7 @@ namespace retromulator
                 if(!usable())
                     return;
                 juce::StringArray items;
-                for(int v = low(); v <= high(); ++v)
+                for(int v = low(); v <= top(); ++v)
                     items.add(textFor(v));
                 const int lo = low();
                 showMenu(*this, items, value() - lo, [this, lo](const int picked)
@@ -579,8 +579,16 @@ namespace retromulator
             void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
             {
                 if(usable() && wheel.deltaY != 0.0f)
-                    setOnce(value() + (wheel.deltaY > 0.0f ? -1 : 1));
+                    setOnce(juce::jlimit(low(), top(), value() + (wheel.deltaY > 0.0f ? -1 : 1)));
             }
+
+        private:
+            // The wave of DCO 2 is three bits, but with noise on the firmware switches pulse and
+            // wave off: 5 to 7 sound as 4, and no factory patch uses them. The menu offers what
+            // the instrument plays; a patch that carries 5 to 7 still shows Noise.
+            static constexpr int kDco2Wave = 16;
+            static constexpr int kNoise = 4;
+            int top() const { return m_native == kDco2Wave ? juce::jmin(high(), kNoise) : high(); }
         };
 
         class Toggle final : public ParamControl
