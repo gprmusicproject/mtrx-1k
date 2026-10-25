@@ -85,6 +85,16 @@ namespace matrixLib
 		void setSpread(float _amount) { m_spread.store(std::min(1.0f, std::max(0.0f, _amount))); }
 		float getSpread() const { return m_spread.load(); }
 
+		// Detune of the voices against each other, the firmware's own: controller 94, which
+		// gives the six voices of an instrument offsets spread evenly around the note, about
+		// 1.2 cents per step for the outermost (measured on firmware 1.20). Up to 40, beyond
+		// which the firmware no longer spreads them evenly. 0 = every voice on the note, as
+		// after power-up. Sent to every instrument when it changes. Any thread.
+		static constexpr int MaxDetune = 40;
+		static constexpr uint8_t DetuneController = 94;
+		void setDetune(int _amount) { m_detune.store(std::min(MaxDetune, std::max(0, _amount))); }
+		int getDetune() const { return m_detune.load(); }
+
 	protected:
 		void readMidiOut(std::vector<synthLib::SMidiEvent>& _midiOut) override;
 		void processAudio(const synthLib::TAudioInputs& _inputs, const synthLib::TAudioOutputs& _outputs, size_t _samples) override;
@@ -205,6 +215,8 @@ namespace matrixLib
 		std::array<std::vector<float>, MaxMachines - 1> m_extraOutR;
 		std::vector<float> m_monoR;
 		std::atomic<float> m_spread{0.0f};
+		std::atomic<int> m_detune{0};
+		int m_detuneSent = 0;       // what the firmware has, 0 after a start
 		float m_spreadNow = 0.0f;   // follows m_spread over a few hundredths of a second
 		std::vector<uint8_t> m_drain;
 		std::vector<uint8_t> m_bootSram;        // calibrated memory every instrument starts from

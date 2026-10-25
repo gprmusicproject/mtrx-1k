@@ -3,6 +3,7 @@
 #include "MidiLearn.h"
 #include "ParameterPool.h"
 #include "matrixLib/patch.h"
+#include "matrixLib/device.h"
 
 #include <array>
 #include <cmath>
@@ -676,21 +677,31 @@ namespace retromulator
             int m_shown = -1;
         };
 
-        // The stereo spread of the voices, 0 to 100 %. The instrument has one output: at 0,
-        // where it starts, every voice sits in the middle. Like the voices a setting of the
-        // instance, saved with it and with a patch saved from the editor; a control of the
-        // player's keyboard can be assigned to it.
-        class SpreadKnob final : public EditPanel::Control
+        // A knob on a setting of the instance rather than a patch parameter: Spread and
+        // Detune. Saved with the instance and with a patch saved from the editor; a control of
+        // the player's keyboard can be assigned to it through its MIDI learn target.
+        class SettingKnob final : public EditPanel::Control
         {
         public:
-            explicit SpreadKnob(EditPanel::Context& context) : Control(context)
+            struct Setting
             {
-                setTitle("Spread");
+                juce::String name;
+                int learnTarget;
+                int maximum;
+                std::function<int()> get;
+                std::function<void(int)> set;
+                std::function<juce::String(int)> valueText;   // in the middle of the knob
+                std::function<juce::String(int)> depthText;   // the small line under it, may be empty
+            };
+
+            SettingKnob(EditPanel::Context& context, Setting setting) : Control(context), m_setting(std::move(setting))
+            {
+                setTitle(m_setting.name);
             }
 
             void refresh() override
             {
-                const int v = ctx.proc.getMatrixSpread();
+                const int v = m_setting.get();
                 if(v != m_shown)
                 {
                     m_shown = v;
@@ -700,7 +711,7 @@ namespace retromulator
 
             void learnTargets(std::vector<LearnTarget>& out) const override
             {
-                out.push_back({MidiLearn::kSpreadTarget, getLocalBounds()});
+                out.push_back({m_setting.learnTarget, getLocalBounds()});
             }
 
             void paint(juce::Graphics& g) override
@@ -709,7 +720,7 @@ namespace retromulator
                 auto b = getLocalBounds();
                 g.setColour(juce::Colour(st.label));
                 g.setFont(sans(9.5f));
-                g.drawFittedText("Spread", b.removeFromTop(kLabelHeight), juce::Justification::centred, 1, 0.7f);
+                g.drawFittedText(m_setting.name, b.removeFromTop(kLabelHeight), juce::Justification::centred, 1, 0.7f);
 
                 const auto area = b.toFloat();
                 const float r  = juce::jmin(area.getWidth(), area.getHeight()) * 0.5f - 2.0f;
@@ -722,11 +733,11 @@ namespace retromulator
                 g.setColour(juce::Colour(st.knobTrack));
                 g.strokePath(track, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
-                const int value = ctx.proc.getMatrixSpread();
+                const int value = m_setting.get();
                 if(value > 0)
                 {
                     juce::Path arc;
-                    arc.addCentredArc(cx, cy, r, r, 0.0f, -sweep, -sweep + static_cast<float>(value) / 100.0f * sweep * 2.0f, true);
+                    arc.addCentredArc(cx, cy, r, r, 0.0f, -sweep, -sweep + static_cast<float>(value) / static_cast<float>(m_setting.maximum) * sweep * 2.0f, true);
                     g.setColour(juce::Colour(st.knobArc));
                     g.strokePath(arc, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
                 }
@@ -735,15 +746,25 @@ namespace retromulator
                 g.setGradientFill(juce::ColourGradient(juce::Colour(st.knobFaceTop), cx, cy - face,
                                                        juce::Colour(st.knobFaceBottom), cx, cy + face, false));
                 g.fillEllipse(cx - face, cy - face, face * 2, face * 2);
+
+                const auto text = m_setting.valueText(value);
+                const auto depth = m_setting.depthText ? m_setting.depthText(value) : juce::String();
                 g.setColour(juce::Colour(st.value));
-                g.setFont(sans(value >= 100 ? 9.5f : 11.0f, true));
-                g.drawText(juce::String(value) + "%", juce::Rectangle<float>(cx - face, cy - 7.0f, face * 2, 14.0f).toNearestInt(),
+                g.setFont(sans(text.length() > 3 ? 9.5f : (depth.isEmpty() ? 11.0f : 10.5f), true));
+                g.drawText(text, juce::Rectangle<float>(cx - face, depth.isEmpty() ? cy - 7.0f : cy - 11.0f, face * 2, 14.0f).toNearestInt(),
                            juce::Justification::centred, false);
+                if(depth.isNotEmpty())
+                {
+                    g.setColour(juce::Colour(st.knobArc));
+                    g.setFont(sans(8.5f));
+                    g.drawFittedText(depth, juce::Rectangle<float>(cx - face + 1.0f, cy + 1.0f, face * 2 - 2.0f, 10.0f).toNearestInt(),
+                                     juce::Justification::centred, 1, 0.75f);
+                }
             }
 
             void mouseDown(const juce::MouseEvent&) override
             {
-                m_dragStart = ctx.proc.getMatrixSpread();
+                m_dragStart = m_setting.get();
                 m_dragging = true;
             }
 
@@ -754,7 +775,7 @@ namespace retromulator
                 // the whole range over 130 pixels, a quarter of that speed with shift, as the other knobs
                 const auto moved = static_cast<float>(e.getDistanceFromDragStartX() - e.getDistanceFromDragStartY());
                 const float pixels = e.mods.isShiftDown() ? 520.0f : 130.0f;
-                set(m_dragStart + juce::roundToInt(moved * 100.0f / pixels));
+                set(m_dragStart + juce::roundToInt(moved * static_cast<float>(m_setting.maximum) / pixels));
             }
 
             void mouseUp(const juce::MouseEvent&) override
@@ -762,7 +783,7 @@ namespace retromulator
                 m_dragging = false;
             }
 
-            // back to the middle, the instrument's own
+            // back to 0, the instrument's own
             void mouseDoubleClick(const juce::MouseEvent&) override
             {
                 set(0);
@@ -771,16 +792,17 @@ namespace retromulator
             void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
             {
                 if(wheel.deltaY != 0.0f)
-                    set(ctx.proc.getMatrixSpread() + (wheel.deltaY > 0.0f ? 1 : -1));
+                    set(m_setting.get() + (wheel.deltaY > 0.0f ? 1 : -1));
             }
 
         private:
-            void set(const int percent)
+            void set(const int value)
             {
-                ctx.proc.setMatrixSpread(percent);
+                m_setting.set(juce::jlimit(0, m_setting.maximum, value));
                 refresh();
             }
 
+            Setting m_setting;
             int  m_shown = -1;
             int  m_dragStart = 0;
             bool m_dragging = false;
@@ -1972,11 +1994,32 @@ namespace retromulator
         }
         {
             const auto at = section("RAMP / PORTAMENTO / KEYBOARD", kRightX, rowC, kRightWidth, kLastRowHeight);
-            knobs(at, {{40, "Ramp 1"}, {42, "Ramp 2"}, {44, "Porta"}, {45, "< Velocity"}});
-            // the spread of the voices, and the voices next to the keyboard mode
-            constexpr int spreadWidth = kKnobWidth - 2;
-            add(std::make_unique<SpreadKnob>(ctx), {at.x + 4 * kKnobWidth, at.y, spreadWidth, kKnobHeight});
-            toggle(47, "Legato", at.x + 4 * kKnobWidth + spreadWidth, at.y + 10);
+            // six knobs and Legato in a row: the knobs of this section are narrower
+            constexpr int w = 40;
+            static const std::pair<int, const char*> patchKnobs[] = {{40, "Ramp 1"}, {42, "Ramp 2"}, {44, "Porta"}, {45, "< Velocity"}};
+            int kx = at.x;
+            for(const auto& [native, label] : patchKnobs)
+            {
+                add(std::make_unique<Knob>(ctx, native, label), {kx, at.y, w, kKnobHeight});
+                kx += w;
+            }
+            // the spread and the detune of the voices, settings kept with the patch
+            add(std::make_unique<SettingKnob>(ctx, SettingKnob::Setting{"Spread", MidiLearn::kSpreadTarget, 100,
+                    [this] { return m_proc.getMatrixSpread(); },
+                    [this](const int v) { m_proc.setMatrixSpread(v); },
+                    [](const int v) { return juce::String(v) + "%"; }, {}}),
+                {kx, at.y, w, kKnobHeight});
+            kx += w;
+            add(std::make_unique<SettingKnob>(ctx, SettingKnob::Setting{"V. Detune", MidiLearn::kDetuneTarget, matrixLib::Device::MaxDetune,
+                    [this] { return m_proc.getMatrixDetune(); },
+                    [this](const int v) { m_proc.setMatrixDetune(v); },
+                    [](const int v) { return juce::String(v); },
+                    // the outermost voices, measured on the firmware: about 1.2 cents a step
+                    [](const int v) { return v > 0 ? juce::String(juce::CharPointer_UTF8("\xc2\xb1")) + juce::String(juce::roundToInt(v * 1.19)) + "c" : juce::String(); }}),
+                {kx, at.y, w, kKnobHeight});
+            kx += w;
+            toggle(47, "Legato", kx, at.y + 10);
+            // the voices next to the keyboard mode
             const int x = choices(at.translated(0, kKnobRow), {{41, "Ramp 1 Trig", 54}, {43, "Ramp 2 Trig", 54}, {46, "Porta Mode", 58}, {48, "Keyboard", 62}});
             add(std::make_unique<VoicesChoice>(ctx), {x, at.y + kKnobRow, 38, kChoiceHeight});
         }

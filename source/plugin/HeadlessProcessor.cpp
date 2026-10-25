@@ -1076,38 +1076,45 @@ namespace retromulator
 
     namespace
     {
-        // Voices and spread of a patch: F0 7D 4D 58 01 vv ss F7, right after the patch in a
-        // bank file. 7D is the ID for non-commercial use, "MX" ours, 01 the version; vv the
-        // voices (6, 12 or 24), ss the spread in percent. Other editors and the instrument
-        // itself pass over a message with an ID that is not theirs.
-        constexpr uint8_t kMatrixExtras[] = {0xf0, 0x7d, 0x4d, 0x58, 0x01};
-        constexpr size_t kMatrixExtrasSize = sizeof(kMatrixExtras) + 3;
+        // Voices, spread and detune of a patch, right after the patch in a bank file:
+        //   F0 7D 4D 58 02 vv ss dd F7   (version 2, from 0.9.7)
+        //   F0 7D 4D 58 01 vv ss F7      (version 1, 0.9.6: no detune, read as 0)
+        // 7D is the ID for non-commercial use, "MX" ours; vv the voices (6, 12 or 24), ss the
+        // spread in percent, dd the detune. Other editors and the instrument itself pass over
+        // a message with an ID that is not theirs.
+        constexpr uint8_t kMatrixExtras[] = {0xf0, 0x7d, 0x4d, 0x58};
 
-        bool parseMatrixExtras(const uint8_t* _msg, const size_t _size, int& _voices, int& _spread)
+        bool parseMatrixExtras(const uint8_t* _msg, const size_t _size, int& _voices, int& _spread, int& _detune)
         {
-            if(_size != kMatrixExtrasSize || std::memcmp(_msg, kMatrixExtras, sizeof(kMatrixExtras)) != 0 || _msg[_size - 1] != 0xf7)
+            if(_size < 8 || std::memcmp(_msg, kMatrixExtras, sizeof(kMatrixExtras)) != 0 || _msg[_size - 1] != 0xf7)
                 return false;
-            const int voices = _msg[5], spread = _msg[6];
-            if((voices != 6 && voices != 12 && voices != 24) || spread > 100)
+            const int version = _msg[4];
+            if(!((version == 1 && _size == 8) || (version == 2 && _size == 9)))
+                return false;
+            const int voices = _msg[5], spread = _msg[6], detune = version >= 2 ? _msg[7] : 0;
+            if((voices != 6 && voices != 12 && voices != 24) || spread > 100 || detune > matrixLib::Device::MaxDetune)
                 return false;
             _voices = voices;
             _spread = spread;
+            _detune = detune;
             return true;
         }
 
-        std::vector<uint8_t> makeMatrixExtras(const int _voices, const int _spread)
+        std::vector<uint8_t> makeMatrixExtras(const int _voices, const int _spread, const int _detune)
         {
             std::vector<uint8_t> m(std::begin(kMatrixExtras), std::end(kMatrixExtras));
+            m.push_back(2);
             m.push_back(static_cast<uint8_t>(_voices));
             m.push_back(static_cast<uint8_t>(juce::jlimit(0, 100, _spread)));
+            m.push_back(static_cast<uint8_t>(juce::jlimit(0, matrixLib::Device::MaxDetune, _detune)));
             m.push_back(0xf7);
             return m;
         }
 
         bool isMatrixExtras(const std::vector<uint8_t>& _msg)
         {
-            int v, s;
-            return parseMatrixExtras(_msg.data(), _msg.size(), v, s);
+            int v, s, d;
+            return parseMatrixExtras(_msg.data(), _msg.size(), v, s, d);
         }
     }
 
@@ -1116,17 +1123,17 @@ namespace retromulator
         m_matrixExtras.clear();
         for(const auto& msg : messages)
         {
-            int voices, spread;
+            int voices, spread, detune;
             if(matrixLib::patch::isSinglePatch(msg.data(), msg.size()))
                 m_matrixExtras.emplace_back();
-            else if(!m_matrixExtras.empty() && parseMatrixExtras(msg.data(), msg.size(), voices, spread))
-                m_matrixExtras.back() = {true, voices, spread};
+            else if(!m_matrixExtras.empty() && parseMatrixExtras(msg.data(), msg.size(), voices, spread, detune))
+                m_matrixExtras.back() = {true, voices, spread, detune};
         }
     }
 
-    // A program chosen: its voices and spread, when it carries them, become the settings.
-    // Every patch sets the voices and the spread: those saved with it, or for a patch without
-    // them, the factory patches among them, those of the instrument, 6 voices in the middle.
+    // Every patch sets voices, spread and detune: those saved with it, or for a patch without
+    // them, the factory patches among them, those of the instrument: 6 voices in the middle,
+    // on the note.
     HeadlessProcessor::MatrixPatchExtras HeadlessProcessor::matrixExtrasOf(const int index) const
     {
         if(index >= 0 && index < static_cast<int>(m_matrixExtras.size()))
@@ -1142,6 +1149,7 @@ namespace retromulator
         const auto e = matrixExtrasOf(index);
         setMatrixVoices(e.voices);
         setMatrixSpread(e.spread);
+        setMatrixDetune(e.detune);
         takeMatrixExtrasReference(index);
     }
 
@@ -1150,6 +1158,7 @@ namespace retromulator
         const auto e = matrixExtrasOf(index);
         m_matrixRefVoices = e.voices;
         m_matrixRefSpread = e.spread;
+        m_matrixRefDetune = e.detune;
     }
 
     // ── Preset loading ────────────────────────────────────────────────────────
@@ -3149,7 +3158,21 @@ namespace retromulator
         {
             dev->setVoiceCount(static_cast<uint32_t>(m_matrixVoices));
             dev->setSpread(static_cast<float>(m_matrixSpread.load()) / 100.0f);
+            dev->setDetune(m_matrixDetune.load());
         }
+    }
+
+    void HeadlessProcessor::setMatrixDetune(const int amount)
+    {
+        m_matrixDetune.store(juce::jlimit(0, matrixLib::Device::MaxDetune, amount));
+        if(auto* dev = getMatrixDevice())
+            dev->setDetune(m_matrixDetune.load());
+    }
+
+    void HeadlessProcessor::setMatrixDetuneFromController(const int value, const int max)
+    {
+        if(max > 0)
+            setMatrixDetune(juce::roundToInt(static_cast<double>(matrixLib::Device::MaxDetune) * juce::jlimit(0, max, value) / max));
     }
 
     void HeadlessProcessor::setMatrixSpread(const int percent)
@@ -3324,7 +3347,8 @@ namespace retromulator
             return false;
         // voices and spread are part of the patch too, once it has been saved with them
         return (m_paramPool && m_paramPool->hasPatchEdits())
-            || m_matrixVoices != m_matrixRefVoices || m_matrixSpread.load() != m_matrixRefSpread;
+            || m_matrixVoices != m_matrixRefVoices || m_matrixSpread.load() != m_matrixRefSpread
+            || m_matrixDetune.load() != m_matrixRefDetune;
     }
 
     bool HeadlessProcessor::saveMatrixPatch(const std::string& bankPath, const int slot, const std::string& name)
@@ -3358,7 +3382,7 @@ namespace retromulator
         const size_t pos = at[static_cast<size_t>(slot)];
         messages[pos] = matrixLib::patch::encode(data, matrixLib::patch::OpSinglePatch, messages[pos][4]);
         // the voices and spread right after it, replacing those it had
-        const auto extras = makeMatrixExtras(m_matrixVoices, m_matrixSpread.load());
+        const auto extras = makeMatrixExtras(m_matrixVoices, m_matrixSpread.load(), m_matrixDetune.load());
         if(pos + 1 < messages.size() && isMatrixExtras(messages[pos + 1]))
             messages[pos + 1] = extras;
         else
@@ -3393,7 +3417,7 @@ namespace retromulator
         {
             messages.push_back(matrixLib::patch::encode(slot == 0 ? data : init, matrixLib::patch::OpSinglePatch, static_cast<uint8_t>(slot)));
             if(slot == 0)
-                messages.push_back(makeMatrixExtras(m_matrixVoices, m_matrixSpread.load()));
+                messages.push_back(makeMatrixExtras(m_matrixVoices, m_matrixSpread.load(), m_matrixDetune.load()));
         }
         if(!writeSysexMessages(file, messages))
             return "The bank file could not be written.";
@@ -3413,6 +3437,7 @@ namespace retromulator
         // the plain starting sound plays as the instrument: 6 voices in the middle
         setMatrixVoices(6);
         setMatrixSpread(0);
+        setMatrixDetune(0);
         // goes out as the loaded program with every parameter edited
         sendBankMessage(m_currentProgram);
         return true;
@@ -4616,6 +4641,8 @@ namespace retromulator
     static constexpr int32_t kMatrixVoicesMagic = 0x4356584D;
     // 'MXSP': the spread, 0-100. Just before 'MXVC', read from the tail as well.
     static constexpr int32_t kMatrixSpreadMagic = 0x5053584D;
+    // 'MXDT': the detune, 0-40. Just before 'MXSP', read from the tail as well.
+    static constexpr int32_t kMatrixDetuneMagic = 0x5444584D;
     // 'MXED': the patch editor, a bit field. 1 = open, 2 = the sound is the initialised patch.
     static constexpr int32_t kMatrixEditorMagic = 0x4445584D;
     // 'MXML': the controller assignments of the MIDI learn in use, as text.
@@ -4794,9 +4821,12 @@ namespace retromulator
             appendInt32(destData, (m_trackerStopAtEnd ? 1 : 0) | (m_trackerShuffle ? 2 : 0));
         }
 
-        // ['MXSP':int32][spread:int32] ['MXVC':int32][voices:int32] ['MXLS':int32][lfo1 division:int32][lfo2 division:int32]
+        // ['MXDT':int32][detune:int32] ['MXSP':int32][spread:int32] ['MXVC':int32][voices:int32]
+        // ['MXLS':int32][lfo1 division:int32][lfo2 division:int32]
         if(m_synthType == SynthType::Matrix)
         {
+            appendInt32(destData, kMatrixDetuneMagic);
+            appendInt32(destData, m_matrixDetune.load());
             appendInt32(destData, kMatrixSpreadMagic);
             appendInt32(destData, m_matrixSpread.load());
             appendInt32(destData, kMatrixVoicesMagic);
@@ -4934,6 +4964,17 @@ namespace retromulator
                 std::memcpy(&spread, bytes + sizeInBytes - 24, 4);
                 if(spreadMagic == kMatrixSpreadMagic && spread >= 0 && spread <= 100)
                     m_matrixSpread.store(spread);
+            }
+
+            // and the detune before those
+            m_matrixDetune.store(0);
+            int32_t detuneMagic = 0, detune = 0;
+            if(spreadMagic == kMatrixSpreadMagic && sizeInBytes >= 36)
+            {
+                std::memcpy(&detuneMagic, bytes + sizeInBytes - 36, 4);
+                std::memcpy(&detune, bytes + sizeInBytes - 32, 4);
+                if(detuneMagic == kMatrixDetuneMagic && detune >= 0 && detune <= matrixLib::Device::MaxDetune)
+                    m_matrixDetune.store(detune);
             }
         }
 

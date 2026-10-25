@@ -39,6 +39,9 @@ namespace retromulator
         // The stereo spread of the voices, a setting of the instance and not a patch
         // parameter: a number between the parameters and the buses.
         static constexpr int kSpreadTarget = 200;
+        // the detune of the voices against each other, the firmware's controller 94, a setting
+        // likewise; not the detune of DCO 2, which is a patch parameter
+        static constexpr int kDetuneTarget = 201;
         enum BusField { BusSource = 0, BusAmount = 1, BusDestination = 2 };
         static constexpr uint16_t kMaxLimit = 16383;
 

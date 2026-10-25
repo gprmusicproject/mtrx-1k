@@ -717,6 +717,13 @@ namespace matrixLib
 					hw.midiIn(127);
 				}
 			}
+			// and the detune the others have
+			if(m_detuneSent)
+			{
+				hw.midiIn(0xb0);
+				hw.midiIn(DetuneController);
+				hw.midiIn(static_cast<uint8_t>(m_detuneSent));
+			}
 			e.readyIn = static_cast<uint32_t>(machine.getSamplerate() * JoinSeconds);
 			m_extras.push_back(std::move(e));
 		}
@@ -1305,6 +1312,15 @@ namespace matrixLib
 		}
 		if(stereo)
 			spreadGains(m_spreadNow, count);
+		// a new detune goes to every instrument before the events of the block
+		const int detune = m_detune.load();
+		if(detune != m_detuneSent)
+		{
+			m_detuneSent = detune;
+			m_emitOffset = 0;
+			const uint8_t cc[3] = {0xb0, DetuneController, static_cast<uint8_t>(detune)};
+			emit(-1, cc, 3);
+		}
 		for(const auto& p : m_pending)
 		{
 			m_emitOffset = static_cast<uint32_t>(std::min<size_t>(p.offset, _samples));
