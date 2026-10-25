@@ -26,7 +26,11 @@ namespace matrixLib
 		void reset();
 
 		// renders _count mono samples, the CPU runs alongside
-		void render(float* _out, size_t _count);
+		void render(float* _out, size_t _count) { render(_out, nullptr, _count, nullptr, nullptr); }
+		// The same in stereo: each voice reaches the left and the right output through a gain
+		// of its own (six of each). The instrument has one output; this is for spreading the
+		// voices in the stereo field, which it cannot do.
+		void render(float* _outL, float* _outR, size_t _count, const float* _gainL, const float* _gainR);
 
 		Hardware& getHardware() { return m_hw; }
 
@@ -76,6 +80,7 @@ namespace matrixLib
 		std::array<Cem3396, Hardware::VoiceCount> m_voices;
 		std::array<std::array<PitchGlide, 2>, Hardware::VoiceCount> m_glides;
 		Halfband2x m_decimator;
+		Halfband2x m_decimatorR;   // the right side when the voices are spread
 
 		float m_rate = 48000.0f;
 		double m_cyclesPerSample = Hardware::CpuClock / 48000.0;
@@ -84,6 +89,8 @@ namespace matrixLib
 
 		float m_dcIn = 0.0f;
 		float m_dcOut = 0.0f;
+		float m_dcInR = 0.0f;
+		float m_dcOutR = 0.0f;
 		float m_dcCoeff = 0.9995f;
 		float m_cvK = 0.0f;       // per sample share of the charge the S&H capacitors exchange
 		float m_heightK = 0.0f;   // per sample step of the stages that follow the ramp height

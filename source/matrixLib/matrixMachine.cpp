@@ -56,6 +56,8 @@ namespace matrixLib
 			v.reset();
 		m_glides = {};
 		m_decimator.reset();
+		m_decimatorR.reset();
+		m_dcInR = m_dcOutR = 0.0f;
 		m_cycleAcc = 0.0;
 		m_dcIn = m_dcOut = m_lastSum = 0.0f;
 		m_hw.reset();
@@ -222,8 +224,9 @@ namespace matrixLib
 		_c.noiseB = m_hw.getLatch(0x1c06) != 0;
 	}
 
-	void Machine::render(float* _out, const size_t _count)
+	void Machine::render(float* _out, float* _outR, const size_t _count, const float* _gainL, const float* _gainR)
 	{
+		const bool stereo = _outR && _gainL && _gainR;
 		auto& acia = m_hw.getAcia();
 		Cem3396::Controls c;
 
@@ -244,12 +247,24 @@ namespace matrixLib
 					--w;
 			const float n0 = noise();
 			const float n1 = noise();
-			float sum0 = 0.0f, sum1 = 0.0f;
+			float sum0 = 0.0f, sum1 = 0.0f, right0 = 0.0f, right1 = 0.0f;
 			for(uint32_t v = 0; v < Hardware::VoiceCount; ++v)
 			{
 				buildControls(v, c);
-				sum0 += m_voices[v].process(c, n0);
-				sum1 += m_voices[v].process(c, n1);
+				const float a = m_voices[v].process(c, n0);
+				const float b = m_voices[v].process(c, n1);
+				if(stereo)
+				{
+					sum0 += a * _gainL[v];
+					sum1 += b * _gainL[v];
+					right0 += a * _gainR[v];
+					right1 += b * _gainR[v];
+				}
+				else
+				{
+					sum0 += a;
+					sum1 += b;
+				}
 			}
 			const float sum = m_decimator.process(sum0, sum1);
 
@@ -291,6 +306,14 @@ namespace matrixLib
 			m_hw.runUntil(end);
 
 			_out[i] = calibrating ? 0.0f : std::tanh(y * OutputGain);
+			if(stereo)
+			{
+				const float sumR = m_decimatorR.process(right0, right1);
+				const float yR = sumR - m_dcInR + m_dcCoeff * m_dcOutR;
+				m_dcInR = sumR;
+				m_dcOutR = yR;
+				_outR[i] = calibrating ? 0.0f : std::tanh(yR * OutputGain);
+			}
 		}
 	}
 }

@@ -851,7 +851,10 @@ namespace matrixLib
 			const size_t at = std::min<size_t>(e.offset, _samples);
 			if(at > pos)
 			{
-				machine.render(_lane.out + pos, at - pos);
+				if(_lane.outR)
+					machine.render(_lane.out + pos, _lane.outR + pos, at - pos, _lane.gainL.data(), _lane.gainR.data());
+				else
+					machine.render(_lane.out + pos, at - pos);
 				pos = at;
 			}
 			if(e.expect >= 0)
@@ -860,7 +863,36 @@ namespace matrixLib
 				hw.midiIn(_lane.bytes[e.first + i]);
 		}
 		if(pos < _samples)
-			machine.render(_lane.out + pos, _samples - pos);
+		{
+			if(_lane.outR)
+				machine.render(_lane.out + pos, _lane.outR + pos, _samples - pos, _lane.gainL.data(), _lane.gainR.data());
+			else
+				machine.render(_lane.out + pos, _samples - pos);
+		}
+	}
+
+	// Places in the stereo field for every voice of every instrument, evenly from left to
+	// right. Voice v of instrument m is slot v * count + m, and slots one after another go
+	// to opposite sides: 0 far left, 1 far right, 2 next to 0, 3 next to 1, and so on. The
+	// gains keep the power of a voice the same wherever it is, at 1 in the middle.
+	void Device::spreadGains(const float _spread, const uint32_t _count)
+	{
+		const uint32_t slots = VoicesPerMachine * _count;
+		constexpr float quarterPi = 0.785398163f;
+		constexpr float root2 = 1.41421356f;
+		for(uint32_t m = 0; m < _count; ++m)
+		{
+			auto& lane = m_lanes[m];
+			for(uint32_t v = 0; v < VoicesPerMachine; ++v)
+			{
+				const uint32_t s = v * _count + m;
+				const uint32_t place = (s & 1) ? slots - 1 - s / 2 : s / 2;
+				const float x = slots > 1 ? -1.0f + 2.0f * static_cast<float>(place) / static_cast<float>(slots - 1) : 0.0f;
+				const float angle = (_spread * x + 1.0f) * quarterPi;
+				lane.gainL[v] = std::cos(angle) * root2;
+				lane.gainR[v] = std::sin(angle) * root2;
+			}
+		}
 	}
 
 	uint32_t Device::noteOn(const uint8_t _channel, const uint8_t _note)
@@ -1219,10 +1251,26 @@ namespace matrixLib
 		takeExtras();
 
 		if(m_mono.size() < _samples)
+		{
 			m_mono.resize(_samples);
+			m_monoR.resize(_samples);
+		}
 		for(size_t i = 0; i < m_extras.size(); ++i)
+		{
 			if(m_extraOut[i].size() < _samples)
+			{
 				m_extraOut[i].resize(_samples);
+				m_extraOutR[i].resize(_samples);
+			}
+		}
+
+		// the spread glides to a new value, so that a knob turned does not step
+		const float spreadTarget = m_spread.load();
+		const float glide = std::min(1.0f, static_cast<float>(_samples) / (0.03f * m_machine.getSamplerate()));
+		m_spreadNow += (spreadTarget - m_spreadNow) * glide;
+		if(std::fabs(spreadTarget - m_spreadNow) < 0.002f)
+			m_spreadNow = spreadTarget;
+		const bool stereo = m_spreadNow > 0.0f;
 
 		feedEdits(_samples);
 
@@ -1251,9 +1299,12 @@ namespace matrixLib
 			auto& lane = m_lanes[i];
 			lane.machine = &machineAt(i);
 			lane.out = i ? m_extraOut[i - 1].data() : m_mono.data();
+			lane.outR = stereo ? (i ? m_extraOutR[i - 1].data() : m_monoR.data()) : nullptr;
 			lane.events.clear();
 			lane.bytes.clear();
 		}
+		if(stereo)
+			spreadGains(m_spreadNow, count);
 		for(const auto& p : m_pending)
 		{
 			m_emitOffset = static_cast<uint32_t>(std::min<size_t>(p.offset, _samples));
@@ -1282,6 +1333,12 @@ namespace matrixLib
 			const float* extra = m_extraOut[i - 1].data();
 			for(size_t s = 0; s < _samples; ++s)
 				m_mono[s] += extra[s];
+			if(stereo)
+			{
+				const float* extraR = m_extraOutR[i - 1].data();
+				for(size_t s = 0; s < _samples; ++s)
+					m_monoR[s] += extraR[s];
+			}
 		}
 
 		for(auto& e : m_extras)
@@ -1297,10 +1354,11 @@ namespace matrixLib
 		else if(anySync && std::fabs(getHostBpm() - m_sentBpm) > 0.05f)
 			sendLfoSync(false);
 
+		const float* right = stereo ? m_monoR.data() : m_mono.data();
 		for(size_t i = 0; i < _samples; ++i)
 		{
 			if(_outputs[0]) _outputs[0][i] = m_mono[i];
-			if(_outputs[1]) _outputs[1][i] = m_mono[i];
+			if(_outputs[1]) _outputs[1][i] = right[i];
 		}
 	}
 

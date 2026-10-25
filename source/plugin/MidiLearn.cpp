@@ -384,6 +384,8 @@ namespace retromulator
 
     juce::String MidiLearn::targetName(const int target)
     {
+        if(target == kSpreadTarget)
+            return "Spread";
         if(target >= kBusTargetFirst)
         {
             static const char* const fields[3] = {"Source", "Amount", "Destination"};
@@ -747,6 +749,11 @@ namespace retromulator
         auto* pool = m_proc.getParameterPool();
         if(!pool || pool->getCore() != SynthType::Matrix)
             return;
+        if(m.target == kSpreadTarget)
+        {
+            m_proc.setMatrixSpreadFromController(value, m.max);
+            return;
+        }
         if(m.target >= kBusTargetFirst)
         {
             const int i = m.target - kBusTargetFirst;
@@ -815,7 +822,7 @@ namespace retromulator
             else
             {
                 m.target = e->getIntAttribute("param", -1);
-                if(m.target < 0 || !matrixLib::patch::findParam(static_cast<uint8_t>(m.target)))
+                if(m.target != kSpreadTarget && (m.target < 0 || !matrixLib::patch::findParam(static_cast<uint8_t>(m.target))))
                     continue;
             }
 

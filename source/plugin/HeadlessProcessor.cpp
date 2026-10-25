@@ -1072,6 +1072,86 @@ namespace retromulator
         }
     }
 
+    // ── Matrix patch extras ─────────────────────────────────────────────────
+
+    namespace
+    {
+        // Voices and spread of a patch: F0 7D 4D 58 01 vv ss F7, right after the patch in a
+        // bank file. 7D is the ID for non-commercial use, "MX" ours, 01 the version; vv the
+        // voices (6, 12 or 24), ss the spread in percent. Other editors and the instrument
+        // itself pass over a message with an ID that is not theirs.
+        constexpr uint8_t kMatrixExtras[] = {0xf0, 0x7d, 0x4d, 0x58, 0x01};
+        constexpr size_t kMatrixExtrasSize = sizeof(kMatrixExtras) + 3;
+
+        bool parseMatrixExtras(const uint8_t* _msg, const size_t _size, int& _voices, int& _spread)
+        {
+            if(_size != kMatrixExtrasSize || std::memcmp(_msg, kMatrixExtras, sizeof(kMatrixExtras)) != 0 || _msg[_size - 1] != 0xf7)
+                return false;
+            const int voices = _msg[5], spread = _msg[6];
+            if((voices != 6 && voices != 12 && voices != 24) || spread > 100)
+                return false;
+            _voices = voices;
+            _spread = spread;
+            return true;
+        }
+
+        std::vector<uint8_t> makeMatrixExtras(const int _voices, const int _spread)
+        {
+            std::vector<uint8_t> m(std::begin(kMatrixExtras), std::end(kMatrixExtras));
+            m.push_back(static_cast<uint8_t>(_voices));
+            m.push_back(static_cast<uint8_t>(juce::jlimit(0, 100, _spread)));
+            m.push_back(0xf7);
+            return m;
+        }
+
+        bool isMatrixExtras(const std::vector<uint8_t>& _msg)
+        {
+            int v, s;
+            return parseMatrixExtras(_msg.data(), _msg.size(), v, s);
+        }
+    }
+
+    void HeadlessProcessor::collectMatrixExtras(const synthLib::SysexBufferList& messages)
+    {
+        m_matrixExtras.clear();
+        for(const auto& msg : messages)
+        {
+            int voices, spread;
+            if(matrixLib::patch::isSinglePatch(msg.data(), msg.size()))
+                m_matrixExtras.emplace_back();
+            else if(!m_matrixExtras.empty() && parseMatrixExtras(msg.data(), msg.size(), voices, spread))
+                m_matrixExtras.back() = {true, voices, spread};
+        }
+    }
+
+    // A program chosen: its voices and spread, when it carries them, become the settings.
+    // Every patch sets the voices and the spread: those saved with it, or for a patch without
+    // them, the factory patches among them, those of the instrument, 6 voices in the middle.
+    HeadlessProcessor::MatrixPatchExtras HeadlessProcessor::matrixExtrasOf(const int index) const
+    {
+        if(index >= 0 && index < static_cast<int>(m_matrixExtras.size()))
+            return m_matrixExtras[static_cast<size_t>(index)];
+        return {};
+    }
+
+    // A program chosen: its voices and spread become the settings.
+    void HeadlessProcessor::applyMatrixPatchExtras(const int index)
+    {
+        if(m_synthType != SynthType::Matrix || index < 0)
+            return;
+        const auto e = matrixExtrasOf(index);
+        setMatrixVoices(e.voices);
+        setMatrixSpread(e.spread);
+        takeMatrixExtrasReference(index);
+    }
+
+    void HeadlessProcessor::takeMatrixExtrasReference(const int index)
+    {
+        const auto e = matrixExtrasOf(index);
+        m_matrixRefVoices = e.voices;
+        m_matrixRefSpread = e.spread;
+    }
+
     // ── Preset loading ────────────────────────────────────────────────────────
 
     bool HeadlessProcessor::loadPreset(const std::vector<uint8_t>& sysexData,
@@ -1099,6 +1179,7 @@ namespace retromulator
         // They are not programs: left in, every patch after one sits a slot too far down.
         if(m_synthType == SynthType::Matrix)
         {
+            collectMatrixExtras(m_bankMessages);
             synthLib::SysexBufferList patches;
             for(const auto& msg : m_bankMessages)
             {
@@ -1192,6 +1273,10 @@ namespace retromulator
         m_bankFileStamp = 0;
         m_bankFileSize  = -1;
         ++m_bankGeneration;
+        // what the program carries, for the Edited lamp; not applied here, a session that
+        // is restored keeps its own settings
+        if(m_synthType == SynthType::Matrix)
+            takeMatrixExtrasReference(m_currentProgram);
         sendBankMessage(m_currentProgram);
         updateHostDisplay(juce::AudioProcessorListener::ChangeDetails()
                               .withNonParameterStateChanged(true)
@@ -1454,6 +1539,7 @@ namespace retromulator
         if(m_paramPool)
             m_paramPool->clearTouched();
         m_matrixInitPatch = false;
+        applyMatrixPatchExtras(index);
 
         // Akai S1000: preset switching is handled by the SFZero subsound system,
         // not by sysex bank messages. Route to the correct selector.
@@ -1710,7 +1796,11 @@ namespace retromulator
             ? ((sep == std::string::npos) ? filePath : filePath.substr(sep + 1))
             : patchName;
 
-        return loadPreset(data, filePath, autoName, programIndex);
+        if(!loadPreset(data, filePath, autoName, programIndex))
+            return false;
+        // a bank chosen: the patch it opens on brings its voices and spread
+        applyMatrixPatchExtras(m_currentProgram);
+        return true;
     }
 
     // ── Sound file loading (Akai S1000) ────────────────────────────────────────
@@ -3045,13 +3135,34 @@ namespace retromulator
         if(v == m_matrixVoices)
             return;
         m_matrixVoices = v;
-        applyMatrixVoices();
+        // building instruments takes a moment: never on the audio thread
+        if(juce::MessageManager::existsAndIsCurrentThread())
+            applyMatrixVoices();
+        else
+            juce::MessageManager::callAsync([this] { applyMatrixVoices(); });
     }
 
+    // also the spread, which a device that starts anew has to be given again
     void HeadlessProcessor::applyMatrixVoices()
     {
         if(auto* dev = getMatrixDevice())
+        {
             dev->setVoiceCount(static_cast<uint32_t>(m_matrixVoices));
+            dev->setSpread(static_cast<float>(m_matrixSpread.load()) / 100.0f);
+        }
+    }
+
+    void HeadlessProcessor::setMatrixSpread(const int percent)
+    {
+        m_matrixSpread.store(juce::jlimit(0, 100, percent));
+        if(auto* dev = getMatrixDevice())
+            dev->setSpread(static_cast<float>(m_matrixSpread.load()) / 100.0f);
+    }
+
+    void HeadlessProcessor::setMatrixSpreadFromController(const int value, const int max)
+    {
+        if(max > 0)
+            setMatrixSpread(juce::roundToInt(100.0 * juce::jlimit(0, max, value) / max));
     }
 
     // ── Matrix patch editing ──────────────────────────────────────────────────
@@ -3209,7 +3320,11 @@ namespace retromulator
 
     bool HeadlessProcessor::hasMatrixPatchEdits() const
     {
-        return m_synthType == SynthType::Matrix && m_paramPool && m_paramPool->hasPatchEdits();
+        if(m_synthType != SynthType::Matrix)
+            return false;
+        // voices and spread are part of the patch too, once it has been saved with them
+        return (m_paramPool && m_paramPool->hasPatchEdits())
+            || m_matrixVoices != m_matrixRefVoices || m_matrixSpread.load() != m_matrixRefSpread;
     }
 
     bool HeadlessProcessor::saveMatrixPatch(const std::string& bankPath, const int slot, const std::string& name)
@@ -3240,8 +3355,14 @@ namespace retromulator
             }
         }
 
-        auto& target = messages[at[static_cast<size_t>(slot)]];
-        target = matrixLib::patch::encode(data, matrixLib::patch::OpSinglePatch, target[4]);
+        const size_t pos = at[static_cast<size_t>(slot)];
+        messages[pos] = matrixLib::patch::encode(data, matrixLib::patch::OpSinglePatch, messages[pos][4]);
+        // the voices and spread right after it, replacing those it had
+        const auto extras = makeMatrixExtras(m_matrixVoices, m_matrixSpread.load());
+        if(pos + 1 < messages.size() && isMatrixExtras(messages[pos + 1]))
+            messages[pos + 1] = extras;
+        else
+            messages.insert(messages.begin() + static_cast<std::ptrdiff_t>(pos + 1), extras);
         if(!writeSysexMessages(file, messages))
             return false;
 
@@ -3269,7 +3390,11 @@ namespace retromulator
         std::vector<std::vector<uint8_t>> messages;
         const auto init = matrixInitPatch();
         for(int slot = 0; slot < kMatrixBankSlots; ++slot)
+        {
             messages.push_back(matrixLib::patch::encode(slot == 0 ? data : init, matrixLib::patch::OpSinglePatch, static_cast<uint8_t>(slot)));
+            if(slot == 0)
+                messages.push_back(makeMatrixExtras(m_matrixVoices, m_matrixSpread.load()));
+        }
         if(!writeSysexMessages(file, messages))
             return "The bank file could not be written.";
 
@@ -3285,6 +3410,9 @@ namespace retromulator
         const auto init = matrixInitPatch();
         m_paramPool->adoptMatrixPatch(init.data());
         m_matrixInitPatch = true;
+        // the plain starting sound plays as the instrument: 6 voices in the middle
+        setMatrixVoices(6);
+        setMatrixSpread(0);
         // goes out as the loaded program with every parameter edited
         sendBankMessage(m_currentProgram);
         return true;
@@ -3323,6 +3451,7 @@ namespace retromulator
         // a file caught half written, or one that no longer reaches the loaded position
         if(patches.empty() || m_currentProgram < 0 || m_currentProgram >= static_cast<int>(patches.size()))
             return false;
+        collectMatrixExtras(messages);
 
         // what plays now, edits included
         matrixLib::patch::Data playing{};
@@ -4485,6 +4614,8 @@ namespace retromulator
     // 'MXVC': the voices, 6, 12 or 24. Just before 'MXLS', so read from the tail as well; a
     // version that does not know it reads past it.
     static constexpr int32_t kMatrixVoicesMagic = 0x4356584D;
+    // 'MXSP': the spread, 0-100. Just before 'MXVC', read from the tail as well.
+    static constexpr int32_t kMatrixSpreadMagic = 0x5053584D;
     // 'MXED': the patch editor, a bit field. 1 = open, 2 = the sound is the initialised patch.
     static constexpr int32_t kMatrixEditorMagic = 0x4445584D;
     // 'MXML': the controller assignments of the MIDI learn in use, as text.
@@ -4663,9 +4794,11 @@ namespace retromulator
             appendInt32(destData, (m_trackerStopAtEnd ? 1 : 0) | (m_trackerShuffle ? 2 : 0));
         }
 
-        // ['MXVC':int32][voices:int32] ['MXLS':int32][lfo1 division:int32][lfo2 division:int32]
+        // ['MXSP':int32][spread:int32] ['MXVC':int32][voices:int32] ['MXLS':int32][lfo1 division:int32][lfo2 division:int32]
         if(m_synthType == SynthType::Matrix)
         {
+            appendInt32(destData, kMatrixSpreadMagic);
+            appendInt32(destData, m_matrixSpread.load());
             appendInt32(destData, kMatrixVoicesMagic);
             appendInt32(destData, m_matrixVoices);
             appendInt32(destData, kMatrixLfoSyncMagic);
@@ -4790,6 +4923,17 @@ namespace retromulator
                 std::memcpy(&voices, bytes + sizeInBytes - 16, 4);
                 if(voicesMagic == kMatrixVoicesMagic && (voices == 6 || voices == 12 || voices == 24))
                     m_matrixVoices = voices;
+            }
+
+            // and the spread before those
+            m_matrixSpread.store(0);
+            int32_t spreadMagic = 0, spread = 0;
+            if(voicesMagic == kMatrixVoicesMagic && sizeInBytes >= 28)
+            {
+                std::memcpy(&spreadMagic, bytes + sizeInBytes - 28, 4);
+                std::memcpy(&spread, bytes + sizeInBytes - 24, 4);
+                if(spreadMagic == kMatrixSpreadMagic && spread >= 0 && spread <= 100)
+                    m_matrixSpread.store(spread);
             }
         }
 

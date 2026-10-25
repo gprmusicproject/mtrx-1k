@@ -36,6 +36,9 @@ namespace retromulator
         // A target is the number of a patch parameter (0-99), or one field of a bus of the
         // modulation matrix: kBusTargetFirst + bus * 3 + field.
         static constexpr int kBusTargetFirst = 256;
+        // The stereo spread of the voices, a setting of the instance and not a patch
+        // parameter: a number between the parameters and the buses.
+        static constexpr int kSpreadTarget = 200;
         enum BusField { BusSource = 0, BusAmount = 1, BusDestination = 2 };
         static constexpr uint16_t kMaxLimit = 16383;
 

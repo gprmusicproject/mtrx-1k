@@ -676,6 +676,116 @@ namespace retromulator
             int m_shown = -1;
         };
 
+        // The stereo spread of the voices, 0 to 100 %. The instrument has one output: at 0,
+        // where it starts, every voice sits in the middle. Like the voices a setting of the
+        // instance, saved with it and with a patch saved from the editor; a control of the
+        // player's keyboard can be assigned to it.
+        class SpreadKnob final : public EditPanel::Control
+        {
+        public:
+            explicit SpreadKnob(EditPanel::Context& context) : Control(context)
+            {
+                setTitle("Spread");
+            }
+
+            void refresh() override
+            {
+                const int v = ctx.proc.getMatrixSpread();
+                if(v != m_shown)
+                {
+                    m_shown = v;
+                    repaint();
+                }
+            }
+
+            void learnTargets(std::vector<LearnTarget>& out) const override
+            {
+                out.push_back({MidiLearn::kSpreadTarget, getLocalBounds()});
+            }
+
+            void paint(juce::Graphics& g) override
+            {
+                const auto& st = style();
+                auto b = getLocalBounds();
+                g.setColour(juce::Colour(st.label));
+                g.setFont(sans(9.5f));
+                g.drawFittedText("Spread", b.removeFromTop(kLabelHeight), juce::Justification::centred, 1, 0.7f);
+
+                const auto area = b.toFloat();
+                const float r  = juce::jmin(area.getWidth(), area.getHeight()) * 0.5f - 2.0f;
+                const float cx = area.getCentreX();
+                const float cy = area.getCentreY() + 1.0f;
+                constexpr float sweep = juce::MathConstants<float>::pi * 0.75f;
+
+                juce::Path track;
+                track.addCentredArc(cx, cy, r, r, 0.0f, -sweep, sweep, true);
+                g.setColour(juce::Colour(st.knobTrack));
+                g.strokePath(track, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                const int value = ctx.proc.getMatrixSpread();
+                if(value > 0)
+                {
+                    juce::Path arc;
+                    arc.addCentredArc(cx, cy, r, r, 0.0f, -sweep, -sweep + static_cast<float>(value) / 100.0f * sweep * 2.0f, true);
+                    g.setColour(juce::Colour(st.knobArc));
+                    g.strokePath(arc, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                }
+
+                const float face = r - 4.5f;
+                g.setGradientFill(juce::ColourGradient(juce::Colour(st.knobFaceTop), cx, cy - face,
+                                                       juce::Colour(st.knobFaceBottom), cx, cy + face, false));
+                g.fillEllipse(cx - face, cy - face, face * 2, face * 2);
+                g.setColour(juce::Colour(st.value));
+                g.setFont(sans(value >= 100 ? 9.5f : 11.0f, true));
+                g.drawText(juce::String(value) + "%", juce::Rectangle<float>(cx - face, cy - 7.0f, face * 2, 14.0f).toNearestInt(),
+                           juce::Justification::centred, false);
+            }
+
+            void mouseDown(const juce::MouseEvent&) override
+            {
+                m_dragStart = ctx.proc.getMatrixSpread();
+                m_dragging = true;
+            }
+
+            void mouseDrag(const juce::MouseEvent& e) override
+            {
+                if(!m_dragging)
+                    return;
+                // the whole range over 130 pixels, a quarter of that speed with shift, as the other knobs
+                const auto moved = static_cast<float>(e.getDistanceFromDragStartX() - e.getDistanceFromDragStartY());
+                const float pixels = e.mods.isShiftDown() ? 520.0f : 130.0f;
+                set(m_dragStart + juce::roundToInt(moved * 100.0f / pixels));
+            }
+
+            void mouseUp(const juce::MouseEvent&) override
+            {
+                m_dragging = false;
+            }
+
+            // back to the middle, the instrument's own
+            void mouseDoubleClick(const juce::MouseEvent&) override
+            {
+                set(0);
+            }
+
+            void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
+            {
+                if(wheel.deltaY != 0.0f)
+                    set(ctx.proc.getMatrixSpread() + (wheel.deltaY > 0.0f ? 1 : -1));
+            }
+
+        private:
+            void set(const int percent)
+            {
+                ctx.proc.setMatrixSpread(percent);
+                refresh();
+            }
+
+            int  m_shown = -1;
+            int  m_dragStart = 0;
+            bool m_dragging = false;
+        };
+
         // Curve drawn from several parameters, in a window like the display's.
         class Graph : public EditPanel::Control
         {
@@ -1863,10 +1973,12 @@ namespace retromulator
         {
             const auto at = section("RAMP / PORTAMENTO / KEYBOARD", kRightX, rowC, kRightWidth, kLastRowHeight);
             knobs(at, {{40, "Ramp 1"}, {42, "Ramp 2"}, {44, "Porta"}, {45, "< Velocity"}});
-            toggle(47, "Legato", at.x + 4 * kKnobWidth + 4, at.y + 10);
-            // above the keyboard mode
-            add(std::make_unique<VoicesChoice>(ctx), {at.x + 5 * kKnobWidth - 4, at.y + 10, kRightX + kRightWidth - 8 - (at.x + 5 * kKnobWidth - 4), kChoiceHeight});
-            choices(at.translated(0, kKnobRow), {{41, "Ramp 1 Trig", 66}, {43, "Ramp 2 Trig", 66}, {46, "Porta Mode", 70}, {48, "Keyboard", 68}});
+            // the spread of the voices, and the voices next to the keyboard mode
+            constexpr int spreadWidth = kKnobWidth - 2;
+            add(std::make_unique<SpreadKnob>(ctx), {at.x + 4 * kKnobWidth, at.y, spreadWidth, kKnobHeight});
+            toggle(47, "Legato", at.x + 4 * kKnobWidth + spreadWidth, at.y + 10);
+            const int x = choices(at.translated(0, kKnobRow), {{41, "Ramp 1 Trig", 54}, {43, "Ramp 2 Trig", 54}, {46, "Porta Mode", 58}, {48, "Keyboard", 62}});
+            add(std::make_unique<VoicesChoice>(ctx), {x, at.y + kKnobRow, 38, kChoiceHeight});
         }
     }
 

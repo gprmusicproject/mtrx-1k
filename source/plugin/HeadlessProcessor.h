@@ -345,6 +345,13 @@ namespace retromulator
         // matrixLib::Device::setVoiceCount. A setting of this instance, saved with it.
         int  getMatrixVoices() const { return m_matrixVoices; }
         void setMatrixVoices(int voices);
+        // Stereo spread of the voices, 0-100 %, see matrixLib::Device::setSpread. Like the
+        // voices a setting of the instance, saved with it, and with a patch saved from the
+        // editor (see kMatrixExtras in the .cpp).
+        int  getMatrixSpread() const { return m_matrixSpread.load(); }
+        void setMatrixSpread(int percent);
+        // from a control of the player's keyboard through the MIDI learn: value out of max
+        void setMatrixSpreadFromController(int value, int max);
 
         // ── Matrix patch editing ───────────────────────────────────────────
         static constexpr int kMatrixRamSlots  = 200;   // patches 000 to 199 of the instrument
@@ -617,6 +624,25 @@ namespace retromulator
         void applyMatrixLfoSync();
         int                  m_matrixVoices = 6;
         void applyMatrixVoices();
+        std::atomic<int>     m_matrixSpread{0};
+
+        // Voices and spread kept with a patch: a message of our own right after the patch in
+        // the bank file. One entry per program of the loaded bank. A patch without them, the
+        // factory patches among them, has those of the instrument: 6 voices, no spread.
+        struct MatrixPatchExtras
+        {
+            bool present = false;
+            int  voices = 6;
+            int  spread = 0;
+        };
+        std::vector<MatrixPatchExtras> m_matrixExtras;
+        MatrixPatchExtras matrixExtrasOf(int index) const;
+        // what the loaded program has, to light Edited when the settings differ from it
+        int  m_matrixRefVoices = 6;
+        int  m_matrixRefSpread = 0;
+        void collectMatrixExtras(const synthLib::SysexBufferList& messages);
+        void applyMatrixPatchExtras(int index);
+        void takeMatrixExtrasReference(int index);
         bool                 m_trackerStopAtEnd = false;
         bool                 m_trackerShuffle = false;
         void reloadTrackerModule();

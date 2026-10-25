@@ -78,6 +78,13 @@ namespace matrixLib
 		void setVoiceCount(uint32_t _voices);
 		uint32_t getVoiceCount() const { return m_machineTarget.load() * VoicesPerMachine; }
 
+		// Stereo spread of the voices, 0 = every voice in the middle as on the instrument,
+		// which has one output, to 1 = from hard left to hard right. Each voice of each
+		// instrument has a place of its own; voices one after another are far apart, so that
+		// the notes of a chord, and of a line in Rotate, go to both sides. Any thread.
+		void setSpread(float _amount) { m_spread.store(std::min(1.0f, std::max(0.0f, _amount))); }
+		float getSpread() const { return m_spread.load(); }
+
 	protected:
 		void readMidiOut(std::vector<synthLib::SMidiEvent>& _midiOut) override;
 		void processAudio(const synthLib::TAudioInputs& _inputs, const synthLib::TAudioOutputs& _outputs, size_t _samples) override;
@@ -148,9 +155,13 @@ namespace matrixLib
 		{
 			Machine* machine = nullptr;
 			float* out = nullptr;
+			float* outR = nullptr;     // set when the voices are spread
+			std::array<float, VoicesPerMachine> gainL{};
+			std::array<float, VoicesPerMachine> gainR{};
 			std::vector<LaneEvent> events;
 			std::vector<uint8_t> bytes;
 		};
+		void spreadGains(float _spread, uint32_t _count);
 		// to one instrument, or to all of them with -1, at the sample of the event being shared out
 		void emit(int _machine, const uint8_t* _data, size_t _count);
 		void emitExpect(uint32_t _machine, bool _dco1, bool _dco2);
@@ -191,6 +202,10 @@ namespace matrixLib
 		Machine m_machine;
 		std::vector<Extra> m_extras;            // audio thread
 		std::array<std::vector<float>, MaxMachines - 1> m_extraOut;
+		std::array<std::vector<float>, MaxMachines - 1> m_extraOutR;
+		std::vector<float> m_monoR;
+		std::atomic<float> m_spread{0.0f};
+		float m_spreadNow = 0.0f;   // follows m_spread over a few hundredths of a second
 		std::vector<uint8_t> m_drain;
 		std::vector<uint8_t> m_bootSram;        // calibrated memory every instrument starts from
 		std::mutex m_poolMutex;
