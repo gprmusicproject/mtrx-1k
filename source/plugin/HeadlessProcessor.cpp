@@ -219,6 +219,28 @@ namespace retromulator
         writeSettingsBool("whitePanel", white);
     }
 
+    double HeadlessProcessor::getUiScale()
+    {
+        const auto file = getSettingsFile();
+        if(file.existsAsFile())
+            if(const auto xml = juce::XmlDocument::parse(file))
+                return xml->getDoubleAttribute("uiScale", 1.0);
+        return 1.0;
+    }
+
+    void HeadlessProcessor::setUiScale(const double scale)
+    {
+        const auto file = getSettingsFile();
+        std::unique_ptr<juce::XmlElement> xml;
+        if(file.existsAsFile())
+            xml = juce::XmlDocument::parse(file);
+        if(!xml)
+            xml = std::make_unique<juce::XmlElement>("RetromulatorSettings");
+
+        xml->setAttribute("uiScale", juce::String(scale, 3));
+        xml->writeTo(file);
+    }
+
     // ── GPL boundary helpers ─────────────────────────────────────────────────
     // These three functions exist solely to keep GPL-specific headers (per-synth
     // ROM loaders, synthLib::DeviceError) out of source/custom/RetroEditor.cpp.

@@ -485,6 +485,11 @@ namespace retromulator
         static bool isWhitePanel();
         static void setWhitePanel(bool white);
 
+        // Size of the GPL editor as a factor of its design size, the last one chosen, shared
+        // by every instance and the standalone app.
+        static double getUiScale();
+        static void setUiScale(double scale);
+
     private:
         SynthType   m_synthType = SynthType::None;
         bool        m_autoStartPending = true;

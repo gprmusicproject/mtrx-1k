@@ -55,9 +55,9 @@ namespace retromulator
         // the later white one with black legends and no stripe.
         enum class Theme { Black, White };
 
-        // Brushed panel with ears, screws and every fixed legend, at 2x for
-        // high-DPI hosts. ledLabels may contain a line break.
-        juce::Image createBackground(Theme theme, const std::array<juce::String, kLedCount>& ledLabels);
+        // Brushed panel with ears, screws and every fixed legend, as a picture with scale
+        // pixels to each unit of the layout. ledLabels may contain a line break.
+        juce::Image createBackground(Theme theme, const std::array<juce::String, kLedCount>& ledLabels, int scale = 2);
 
         // Name at the top left, under a stripe on the black panel, drawn as an outline
         // like the model name on the hardware.

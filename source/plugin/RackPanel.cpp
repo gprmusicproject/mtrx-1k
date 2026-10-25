@@ -217,11 +217,10 @@ namespace retromulator
 
     namespace rackPanel
     {
-        juce::Image createBackground(const Theme theme, const std::array<juce::String, kLedCount>& ledLabels)
+        juce::Image createBackground(const Theme theme, const std::array<juce::String, kLedCount>& ledLabels, const int scale)
         {
             const Palette& pal = paletteFor(theme);
 
-            constexpr int scale = 2;
             juce::Image image(juce::Image::RGB, kWidth * scale, kHeight * scale, false);
             juce::Graphics g(image);
 

@@ -6,6 +6,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <array>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -26,6 +27,30 @@ namespace retromulator
 
         // Declared before the components that use it so it outlives them.
         RackLookAndFeel m_lookAndFeel;
+
+        // Everything is laid out at the design size on this sheet, which is scaled as a whole
+        // to the size of the window: the layout stays the same at any size, and all but the
+        // background of the rack unit is drawn as paths and text, sharp at any scale.
+        class Canvas final : public juce::Component
+        {
+        public:
+            std::function<void(juce::Graphics&)> onPaint;
+            void paint(juce::Graphics& g) override { if(onPaint) onPaint(g); }
+        };
+        Canvas m_canvas;
+        juce::ComponentBoundsConstrainer m_constrainer;
+        double m_scale = 1.0;
+        double m_savedScale = 1.0;
+        int    m_scaleSaveTicks = 0;      // timer ticks until a new size is kept
+        int    m_backgroundScale = 2;     // pixels of the background picture to a unit of the layout
+        static constexpr double kMinScale = 0.6;
+        static constexpr double kMaxScale = 2.0;
+        // height of the layout: the rack unit, and the patch editor when it is open
+        int  logicalHeight() const;
+        void updateConstrainer();
+        void paintPanel(juce::Graphics& g);
+        void rebuildBackground();
+        double fittingScale(int logicalH) const;
 
         juce::TextButton m_prevBtn  { "<" };
         juce::TextButton m_nextBtn  { ">" };

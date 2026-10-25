@@ -19,13 +19,14 @@ MTRX-1K is not affiliated with, endorsed by or connected to Oberheim. Oberheim a
 - 6, 12 or 24 voices, picked with the Voices selector of the editor. The firmware is not changed: for 12 or 24 voices MTRX-1K runs two or four complete instruments, firmware and voice board each, the way Matrix-1000 modules chained over MIDI play, and gives every note to one of them; everything else reaches all of them. In unison the first one plays alone, as a single Matrix-1000 does. The setting belongs to the instance and is saved with it. The added instruments are rendered on threads of their own beside the host's audio thread, so the audio thread carries no more than with six voices and the latency stays the same; each instrument costs about 9% of one core of an i9-13900H.
 - Both LFOs can follow the host tempo. A cycle of the firmware's LFO lasts a whole number of steps of 26.6 ms, so a division is met within a few percent, not exactly.
 - A MIDI program change selects that position of the loaded bank.
+- A window that can be resized, from 60% to 200% of its normal size, by its bottom right corner or the edges of the host's window. The layout keeps its proportions and is drawn again at the new size, so legends, knobs and the brushed panel stay sharp; the size is remembered, and a window that would not fit on the screen when the editor opens is made smaller.
 - A Manual key on the panel opens the user manual, a PDF that the setup program installs next to the standalone app.
 
 Where the original moves a pitch or a control voltage in audible steps, about 75 times a second, MTRX-1K joins the steps. Everything else is meant to behave as the instrument does, firmware quirks included: the LFOs are one per voice, portamento glides from the note a voice played last, and the keyboard mode "Reassign Rob" does not rob a voice in firmware 1.20.
 
 ## Status
 
-Version 0.9.3, October 2026. Built and tested on Windows 11 as a VST3 in Cubase 15 and as a standalone app. The build files for other systems come from Retromulator and have not been tried with this version.
+Version 0.9.4, October 2026. Built and tested on Windows 11 as a VST3 in Cubase 15 and as a standalone app. The build files for other systems come from Retromulator and have not been tried with this version.
 
 ## Firmware
 
@@ -64,7 +65,7 @@ This is a modified version of Retromulator 1.8.0 (commit `c20db50` of github.com
 
 - **Build**: a CMake project for Windows (`CMakeLists.txt`, `cmake/`, `build_win.bat`) next to the Projucer project of Retromulator.
 - **Product**: name, vendor and plugin identifiers of MTRX-1K; only the Matrix-1000 core is started. The other cores of Retromulator are still in the source tree and are compiled in.
-- **Interface** (`source/plugin`): the rack panel (`RackPanel`), the patch editor (`EditPanel`), saving and bank handling, the session state of the editor, automatable parameters, program change, and the MIDI learn with its profiles (`MidiLearn`).
+- **Interface** (`source/plugin`): the rack panel (`RackPanel`), the patch editor (`EditPanel`), saving and bank handling, the session state of the editor, automatable parameters, program change, and the MIDI learn with its profiles (`MidiLearn`), and the scaling of the whole window.
 - **Emulation** (`source/matrixLib`): the three sync modes after the schematic of the voice board; the timer writes with which the firmware moves a pitch; joined pitch and control voltage steps; the height of the oscillator ramp through a pitch change; the DCO click; pacing of remote parameter edits so that held notes follow a knob; portamento rate 0 in unison; the LFO rates used for the tempo sync; two or four instruments side by side for 12 or 24 voices.
 
 ## The name and the symbol

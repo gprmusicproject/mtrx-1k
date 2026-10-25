@@ -18,7 +18,7 @@
 ;   /DManualPdf=<file>    the user manual
 
 #define AppName      "MTRX-1K"
-#define AppVersion   "0.9.3"
+#define AppVersion   "0.9.4"
 #define Publisher    "GPR Music Project"
 #define ManualName   "MTRX-1K User Manual.pdf"
 #define NoteName     "Put your firmware here - read me.txt"

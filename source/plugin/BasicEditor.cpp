@@ -81,8 +81,17 @@ namespace retromulator
         : AudioProcessorEditor(p), m_proc(p), m_about(kPanelName, g_pluginVersionString), m_editPanel(p)
     {
         setLookAndFeel(&m_lookAndFeel);
-        setSize(rackPanel::kWidth, rackPanel::kHeight);
-        setResizable(false, false);
+
+        // The sheet first, so that the corner for resizing, added below, lies on top of it.
+        // The window opens at the size last chosen, and keeps the proportions of the layout.
+        m_canvas.onPaint = [this](juce::Graphics& g) { paintPanel(g); };
+        addAndMakeVisible(m_canvas);
+        m_savedScale = juce::jlimit(kMinScale, kMaxScale, HeadlessProcessor::getUiScale());
+        m_scale = juce::jmax(kMinScale, juce::jmin(m_savedScale, fittingScale(rackPanel::kHeight)));
+        updateConstrainer();
+        setConstrainer(&m_constrainer);
+        setResizable(true, true);
+        setSize(juce::roundToInt(rackPanel::kWidth * m_scale), juce::roundToInt(rackPanel::kHeight * m_scale));
 
         setTheme(HeadlessProcessor::isWhitePanel() ? rackPanel::Theme::White : rackPanel::Theme::Black);
 
@@ -102,8 +111,8 @@ namespace retromulator
             else
                 navigatePatch(+1);
         };
-        addAndMakeVisible(m_prevBtn);
-        addAndMakeVisible(m_nextBtn);
+        m_canvas.addAndMakeVisible(m_prevBtn);
+        m_canvas.addAndMakeVisible(m_nextBtn);
 
         // ── Program combo ────────────────────────────────────────────────────
         m_progCombo.onChange = [this]
@@ -138,7 +147,7 @@ namespace retromulator
                 updateStatus();
             }
         };
-        addAndMakeVisible(m_progCombo);
+        m_canvas.addAndMakeVisible(m_progCombo);
 
         // ── Bank combo ───────────────────────────────────────────────────────
         m_bankCombo.onChange = [this]
@@ -247,11 +256,11 @@ namespace retromulator
                 }
             }
         };
-        addAndMakeVisible(m_bankCombo);
+        m_canvas.addAndMakeVisible(m_bankCombo);
 
         // ── Status label ─────────────────────────────────────────────────────
         m_statusLabel.setJustificationType(juce::Justification::centredRight);
-        addAndMakeVisible(m_statusLabel);
+        m_canvas.addAndMakeVisible(m_statusLabel);
 
         // ── Rack panel ───────────────────────────────────────────────────────
         // Audio taper: the knob's travel is the square root of the gain.
@@ -260,7 +269,7 @@ namespace retromulator
             const auto v = static_cast<float>(m_volume.getValue());
             m_proc.setOutputGain(v * v);
         };
-        addAndMakeVisible(m_volume);
+        m_canvas.addAndMakeVisible(m_volume);
 
         m_selectBtn.onClick = [this]
         {
@@ -295,41 +304,41 @@ namespace retromulator
         m_progCombo.setTitle("Patch");
 
         for(auto* b : { &m_selectBtn, &m_bankLockBtn, &m_enterBtn, &m_plusBtn, &m_minusBtn })
-            addAndMakeVisible(*b);
+            m_canvas.addAndMakeVisible(*b);
 
         for(int i = 0; i < 10; ++i)
         {
             auto& b = m_digitBtns[static_cast<size_t>(i)];
             b = std::make_unique<PanelButton>(juce::String(i));
             b->onClick = [this, i] { onPanelDigit(i); };
-            addAndMakeVisible(*b);
+            m_canvas.addAndMakeVisible(*b);
         }
 
-        addAndMakeVisible(m_display);
-        addAndMakeVisible(m_power);
-        addAndMakeVisible(m_themeSwitch);
+        m_canvas.addAndMakeVisible(m_display);
+        m_canvas.addAndMakeVisible(m_power);
+        m_canvas.addAndMakeVisible(m_themeSwitch);
 
         m_aboutBtn.onClick = [this]
         {
             m_about.setVisible(true);
             m_about.toFront(false);
         };
-        addAndMakeVisible(m_aboutBtn);
+        m_canvas.addAndMakeVisible(m_aboutBtn);
 
         m_manualBtn.onClick = [this] { openManual(); };
-        addAndMakeVisible(m_manualBtn);
+        m_canvas.addAndMakeVisible(m_manualBtn);
 
         m_editBtn.setClickingTogglesState(true);
         m_editBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff1f5fb0));
         m_editBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
         m_editBtn.onClick = [this] { setEditOpen(m_editBtn.getToggleState()); };
-        addAndMakeVisible(m_editBtn);
+        m_canvas.addAndMakeVisible(m_editBtn);
         m_editPanel.onProgramChanged = [this] { updateStatus(); };
         m_editPanel.setTheme(m_theme);
-        addChildComponent(m_editPanel);
+        m_canvas.addChildComponent(m_editPanel);
 
-        addChildComponent(m_about);
-        addChildComponent(m_startProgress);
+        m_canvas.addChildComponent(m_about);
+        m_canvas.addChildComponent(m_startProgress);
         resized();
 
         updateStatus();
@@ -346,6 +355,21 @@ namespace retromulator
 
     void BasicEditor::paint(juce::Graphics& g)
     {
+        // seen only where rounding leaves the sheet a pixel short of the window
+        g.fillAll(juce::Colour(0xff101114));
+    }
+
+    void BasicEditor::paintPanel(juce::Graphics& g)
+    {
+        // The background is a picture: it is drawn again when the screen has more pixels to
+        // a unit of the layout than the picture has, or far fewer.
+        const int need = juce::jlimit(2, 4, static_cast<int>(std::ceil(g.getInternalContext().getPhysicalPixelScaleFactor() - 0.05f)));
+        if(need != m_backgroundScale)
+        {
+            m_backgroundScale = need;
+            rebuildBackground();
+        }
+
         g.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
         g.drawImage(m_background, juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(rackPanel::kWidth), static_cast<float>(rackPanel::kHeight)));
 
@@ -354,9 +378,48 @@ namespace retromulator
             rackPanel::drawLed(g, i, m_leds[static_cast<size_t>(i)]);
     }
 
+    int BasicEditor::logicalHeight() const
+    {
+        return rackPanel::kHeight + (m_editPanel.isVisible() ? EditPanel::kHeight : 0);
+    }
+
+    void BasicEditor::updateConstrainer()
+    {
+        const int h = logicalHeight();
+        m_constrainer.setFixedAspectRatio(static_cast<double>(rackPanel::kWidth) / h);
+        m_constrainer.setSizeLimits(juce::roundToInt(rackPanel::kWidth * kMinScale), juce::roundToInt(h * kMinScale),
+                                    juce::roundToInt(rackPanel::kWidth * kMaxScale), juce::roundToInt(h * kMaxScale));
+    }
+
+    // The largest scale at which the layout fits the screen the window is on, with room for
+    // the frame and title bar of the window around it.
+    double BasicEditor::fittingScale(const int logicalH) const
+    {
+        const auto& displays = juce::Desktop::getInstance().getDisplays();
+        const auto* display = isShowing() ? displays.getDisplayForRect(getScreenBounds()) : displays.getPrimaryDisplay();
+        if(display == nullptr)
+            return kMaxScale;
+        constexpr int frameW = 24, frameH = 72;
+        const auto area = display->userArea;
+        return juce::jmin(static_cast<double>(area.getWidth() - frameW) / rackPanel::kWidth,
+                          static_cast<double>(area.getHeight() - frameH) / logicalH);
+    }
+
+    void BasicEditor::rebuildBackground()
+    {
+        m_background = rackPanel::createBackground(m_theme, { "Patch", "Bank", "Ready", "Boot", "No\nROM", "Error" }, m_backgroundScale);
+    }
+
     void BasicEditor::resized()
     {
         using namespace rackPanel;
+
+        // the sheet keeps the design size and is scaled to the window
+        m_scale = static_cast<double>(getWidth()) / kWidth;
+        m_canvas.setTransform(juce::AffineTransform::scale(static_cast<float>(m_scale)));
+        m_canvas.setBounds(0, 0, kWidth, logicalHeight());
+        if(std::abs(m_scale - m_savedScale) > 0.001)
+            m_scaleSaveTicks = kPanelTimerHz / 2;
 
         // Rack unit, positions taken from the Matrix-1000 front panel
         constexpr int keyW = 28, keyH = 20, upperRowY = 22, lowerRowY = 56;
@@ -386,7 +449,7 @@ namespace retromulator
         m_prevBtn   .setBounds(kStripNavX, y, 24, h);
         m_nextBtn   .setBounds(kStripNavX + 26, y, 24, h);
         m_progCombo .setBounds(kStripPatchX, y, kStripPatchW, h);
-        m_statusLabel.setBounds(kStripPatchX + kStripPatchW + 6, y, getWidth() - (kStripPatchX + kStripPatchW + 6) - 8, h);
+        m_statusLabel.setBounds(kStripPatchX + kStripPatchW + 6, y, kWidth - (kStripPatchX + kStripPatchW + 6) - 8, h);
     }
 
     void BasicEditor::refreshBankCombo()
@@ -1223,6 +1286,13 @@ namespace retromulator
 
     void BasicEditor::timerCallback()
     {
+        // the size the window was given is kept once the drag has rested
+        if(m_scaleSaveTicks > 0 && --m_scaleSaveTicks == 0)
+        {
+            m_savedScale = m_scale;
+            HeadlessProcessor::setUiScale(m_scale);
+        }
+
         if(m_entryTicks > 0 && --m_entryTicks == 0)
             m_entry.clear();
         if(m_flashTicks > 0)
@@ -1334,7 +1404,7 @@ namespace retromulator
         if(leds != m_leds)
         {
             m_leds = leds;
-            repaint(0, 0, getWidth(), rackPanel::kUnitHeight);
+            m_canvas.repaint(0, 0, rackPanel::kWidth, rackPanel::kUnitHeight);
         }
     }
 
@@ -1552,17 +1622,20 @@ namespace retromulator
         m_editPanel.setVisible(open);
         if(open)
             m_editPanel.refresh();
-        setSize(rackPanel::kWidth, rackPanel::kHeight + (open ? EditPanel::kHeight : 0));
+        // the same scale and new proportions, smaller if the window would leave the screen
+        updateConstrainer();
+        const double scale = juce::jmax(kMinScale, juce::jmin(m_scale, fittingScale(logicalHeight())));
+        setSize(juce::roundToInt(rackPanel::kWidth * scale), juce::roundToInt(logicalHeight() * scale));
     }
 
     void BasicEditor::setTheme(const rackPanel::Theme theme)
     {
         m_theme = theme;
-        m_background = rackPanel::createBackground(theme, { "Patch", "Bank", "Ready", "Boot", "No\nROM", "Error" });
+        rebuildBackground();
         m_themeSwitch.setToggleState(theme == rackPanel::Theme::White, juce::dontSendNotification);
         m_aboutBtn.setTheme(theme);
         m_manualBtn.setTheme(theme);
         m_editPanel.setTheme(theme);
-        repaint();
+        m_canvas.repaint();
     }
 }
