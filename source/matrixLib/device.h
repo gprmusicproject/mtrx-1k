@@ -159,7 +159,8 @@ namespace matrixLib
 			uint32_t offset;
 			uint32_t first;   // into the lane's bytes
 			uint32_t count;
-			int8_t expect;    // -1, or the flags of expectNote: 1 = DCO 1, 2 = DCO 2
+			int8_t expect;    // -1, or a note with the flags of expectNote: 1 = DCO 1 has portamento, 2 = DCO 2
+			int16_t interval; // and how far it moves the pitch in cents, 0 when not known
 		};
 		struct Lane
 		{
@@ -174,7 +175,7 @@ namespace matrixLib
 		void spreadGains(float _spread, uint32_t _count);
 		// to one instrument, or to all of them with -1, at the sample of the event being shared out
 		void emit(int _machine, const uint8_t* _data, size_t _count);
-		void emitExpect(uint32_t _machine, bool _dco1, bool _dco2);
+		void emitExpect(uint32_t _machine, bool _portaDco1, bool _portaDco2, int _interval);
 		static void renderLane(Lane& _lane, size_t _samples);
 		void startWorkers();
 		void workerLoop(uint32_t _index);
@@ -207,6 +208,8 @@ namespace matrixLib
 		std::vector<HeldNote> m_held;
 		std::array<uint64_t, MaxMachines> m_lastNoteOn{};
 		uint64_t m_noteCount = 0;
+		int m_unisonNote = -1;   // the note the voices play in unison, -1 when not known
+		int unisonNote() const;
 		uint16_t m_pedalDown = 0;   // one bit per channel
 
 		Machine m_machine;

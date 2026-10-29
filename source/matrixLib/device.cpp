@@ -155,7 +155,7 @@ namespace matrixLib
 		constexpr uint8_t LfoSpeedParam[2] = {80, 90};
 		constexpr uint8_t PortaRateParam = 44;
 		constexpr uint8_t Dco1PortaParam = 8;       // 1 = DCO 1 glides
-		constexpr uint8_t Dco2KeyboardParam = 18;   // 1 = DCO 2 follows the keyboard with portamento
+		constexpr uint8_t Dco2KeyboardParam = 18;   // bit 0: DCO 2 follows the keyboard with portamento (Porta, Porta+Keyb)
 
 		// without a host playhead, MIDI clock or SysEx tempo (the standalone app)
 		constexpr float DefaultBpm = 120.0f;
@@ -837,14 +837,14 @@ namespace matrixLib
 		for(uint32_t i = from; i < to; ++i)
 		{
 			auto& lane = m_lanes[i];
-			lane.events.push_back({m_emitOffset, static_cast<uint32_t>(lane.bytes.size()), static_cast<uint32_t>(_count), -1});
+			lane.events.push_back({m_emitOffset, static_cast<uint32_t>(lane.bytes.size()), static_cast<uint32_t>(_count), -1, 0});
 			lane.bytes.insert(lane.bytes.end(), _data, _data + _count);
 		}
 	}
 
-	void Device::emitExpect(const uint32_t _machine, const bool _dco1, const bool _dco2)
+	void Device::emitExpect(const uint32_t _machine, const bool _portaDco1, const bool _portaDco2, const int _interval)
 	{
-		m_lanes[_machine].events.push_back({m_emitOffset, 0, 0, static_cast<int8_t>((_dco1 ? 1 : 0) | (_dco2 ? 2 : 0))});
+		m_lanes[_machine].events.push_back({m_emitOffset, 0, 0, static_cast<int8_t>((_portaDco1 ? 1 : 0) | (_portaDco2 ? 2 : 0)), static_cast<int16_t>(_interval)});
 	}
 
 	// renders a block, handing each event to the firmware at its sample
@@ -865,7 +865,7 @@ namespace matrixLib
 				pos = at;
 			}
 			if(e.expect >= 0)
-				machine.expectNote((e.expect & 1) != 0, (e.expect & 2) != 0);
+				machine.expectNote((e.expect & 1) != 0, (e.expect & 2) != 0, e.interval);
 			for(uint32_t i = 0; i < e.count; ++i)
 				hw.midiIn(_lane.bytes[e.first + i]);
 		}
@@ -972,6 +972,16 @@ namespace matrixLib
 	void Device::forgetNotes(const uint8_t _channel)
 	{
 		m_held.erase(std::remove_if(m_held.begin(), m_held.end(), [_channel](const HeldNote& _h) { return _h.channel == _channel; }), m_held.end());
+	}
+
+	// the lowest key held, which the firmware plays in unison, -1 when none is
+	int Device::unisonNote() const
+	{
+		int lowest = -1;
+		for(const auto& h : m_held)
+			if(lowest < 0 || h.note < lowest)
+				lowest = h.note;
+		return lowest;
 	}
 
 	void Device::queueEdit(const std::vector<uint8_t>& _sysex)
@@ -1246,9 +1256,28 @@ namespace matrixLib
 		}
 
 		// The pitch the firmware writes next for a resting voice is this note, see Machine.
-		// Not for an oscillator with portamento: its first step is the start of a glide.
-		if(type == 0x90 && bytes[2] && m_paramsKnown)
-			emitExpect(static_cast<uint32_t>(target), m_paramValue[Dco1PortaParam] == 0, m_paramValue[Dco2KeyboardParam] != 1);
+		// An oscillator with portamento may start a glide there instead, see Machine::expectNote.
+		// In unison every voice moves to the lowest key held, the one the firmware plays, from
+		// the note before: on a note on, and on the note off that leaves a lower key sounding.
+		if((type == 0x90 || type == 0x80) && m_paramsKnown)
+		{
+			const bool on = type == 0x90 && bytes[2];
+			int interval = 0;
+			if(m_paramValue[KeyboardModeParam] == KeyboardUnison)
+			{
+				const int lowest = unisonNote();
+				if(lowest >= 0 && m_unisonNote >= 0)
+					interval = (lowest - m_unisonNote) * 100;
+				if(lowest >= 0)
+					m_unisonNote = lowest;
+			}
+			else
+			{
+				m_unisonNote = -1;
+			}
+			if(on || interval != 0)
+				emitExpect(on ? static_cast<uint32_t>(target) : 0, m_paramValue[Dco1PortaParam] != 0, (m_paramValue[Dco2KeyboardParam] & 1) != 0, interval);
+		}
 
 		emit(target, bytes, length);
 	}

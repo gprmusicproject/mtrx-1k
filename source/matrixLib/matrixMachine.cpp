@@ -29,6 +29,7 @@ namespace matrixLib
 		constexpr float GlideLongest = 0.020f;
 		constexpr float CountStays = 0.00025f;      // seconds before a new timer count is believed
 		constexpr float NoteArrives = 0.04f;        // seconds from a note on to the pitch the firmware writes for it
+		constexpr float NoteStepTolerance = 0.35f;  // share of the interval by which the step of a note may miss it
 		constexpr float HeightLag = 0.006f;         // seconds, each of the two stages that follow the ramp height
 		constexpr float RangeSettles = 0.012f;      // seconds the waveshape voltage needs after a change of range
 	}
@@ -64,11 +65,13 @@ namespace matrixLib
 		m_sampleCycle = m_hw.getCycles();
 	}
 
-	void Machine::expectNote(const bool _dco1, const bool _dco2)
+	void Machine::expectNote(const bool _portaDco1, const bool _portaDco2, const int _interval)
 	{
 		const auto window = static_cast<uint32_t>(NoteArrives * m_rate);
-		m_noteWindow[0] = _dco1 ? window : 0;
-		m_noteWindow[1] = _dco2 ? window : 0;
+		m_noteWindow = {window, window};
+		m_notePorta = {_portaDco1, _portaDco2};
+		m_noteInterval = static_cast<float>(_interval);
+		++m_noteSerial;
 	}
 
 	float Machine::noise()
@@ -79,8 +82,9 @@ namespace matrixLib
 		return static_cast<float>(static_cast<int32_t>(m_noiseState)) * (1.0f / 2147483648.0f);
 	}
 
-	float Machine::glide(PitchGlide& _g, uint32_t _count, const bool _noteDue)
+	float Machine::glide(PitchGlide& _g, uint32_t _count, const uint32_t _dco)
 	{
+		const bool noteDue = m_noteWindow[_dco] != 0;
 		// While the firmware rewrites a timer it stands still for some 20 microseconds and then
 		// shows the stretch that ends the old cycle for some 80 more. Samples that fall there
 		// must not sound: a count is taken once it has stayed a quarter of a millisecond.
@@ -105,9 +109,23 @@ namespace matrixLib
 				&& to < _g.value * ratio && _g.value < to * ratio;
 			// A voice at rest that moves just after a note on is taking that note, however
 			// near the one it played before: it starts in tune, as a lever or an LFO setting
-			// out does not have to.
-			if(_noteDue && _g.sinceMove > longest)
+			// out does not have to. With portamento it may be the first step of a glide.
+			if(noteDue && _g.sinceMove > longest && !m_notePorta[_dco])
 				joined = false;
+			// When the interval of the note is known (unison), the step that covers it is the
+			// note, at rest or not, with portamento or not: the firmware does not glide every
+			// note (not in unison with Legato on, for one) and moves the pitch in one step then,
+			// which must not come a hundredth of a second late. A step of the vibrato is far
+			// smaller, the first step of a portamento a part of the interval.
+			if(noteDue && m_noteInterval != 0.0f && _g.noteSerial != m_noteSerial && _g.value > 0.0f)
+			{
+				const float cents = 1200.0f * std::log2(_g.value / to);
+				if(cents * m_noteInterval > 0.0f && std::fabs(cents - m_noteInterval) < NoteStepTolerance * std::fabs(m_noteInterval))
+				{
+					joined = false;
+					_g.noteSerial = m_noteSerial;
+				}
+			}
 			if(joined && !isCalibrating())
 			{
 				// arrive when the next step is due: after the time the last one took, or the
@@ -145,8 +163,8 @@ namespace matrixLib
 
 		const uint32_t pA = m_hw.getDcoPeriod(_voice, 0);
 		const uint32_t pB = m_hw.getDcoPeriod(_voice, 1);
-		_c.periodA = glide(m_glides[_voice][0], pA, m_noteWindow[0] != 0) / Hardware::VoiceTimerClock;
-		_c.periodB = glide(m_glides[_voice][1], pB, m_noteWindow[1] != 0) / Hardware::VoiceTimerClock;
+		_c.periodA = glide(m_glides[_voice][0], pA, 0) / Hardware::VoiceTimerClock;
+		_c.periodB = glide(m_glides[_voice][1], pB, 1) / Hardware::VoiceTimerClock;
 		// the calibration keeps the converters as it has always seen them
 		const bool calibrating = isCalibrating();
 		_c.holdA = m_glides[_voice][0].target == StoppedCount && !calibrating;

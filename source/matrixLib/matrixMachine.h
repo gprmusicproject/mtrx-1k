@@ -36,8 +36,10 @@ namespace matrixLib
 
 		// A note on has just gone to the firmware: the pitch step that takes a resting voice
 		// to it within the next few hundredths of a second is not joined to the old pitch.
-		// One flag per oscillator: false leaves it joined, for one that glides to its notes.
-		void expectNote(bool _dco1, bool _dco2);
+		// One flag per oscillator with portamento, whose step may be the first of a glide
+		// instead. _interval, in cents, is how far the pitch moves when it is known, 0 when
+		// not: the step that covers it is not joined either, see glide.
+		void expectNote(bool _portaDco1, bool _portaDco2, int _interval);
 
 		// the noise source starts from this, so that two machines do not play the same noise
 		void setNoiseSeed(uint32_t _seed) { m_noiseState = _seed ? _seed : 0x12345678u; }
@@ -70,10 +72,11 @@ namespace matrixLib
 			float step = 0.0f;
 			uint32_t left = 0;         // samples until value arrives at target
 			uint32_t sinceMove = 0;    // samples since the firmware last moved it
+			uint32_t noteSerial = 0;   // the expected note whose step it has taken
 		};
 
 		void buildControls(uint32_t _voice, Cem3396::Controls& _c);
-		float glide(PitchGlide& _g, uint32_t _count, bool _noteDue);
+		float glide(PitchGlide& _g, uint32_t _count, uint32_t _dco);
 		float noise();
 
 		Hardware m_hw;
@@ -98,6 +101,9 @@ namespace matrixLib
 		bool m_comparator = false;
 
 		std::array<uint32_t, 2> m_noteWindow{};   // per oscillator: samples left in which a resting voice takes a new note
+		std::array<bool, 2> m_notePorta{};        // per oscillator: it has portamento
+		float m_noteInterval = 0.0f;              // cents the expected note moves the pitch, 0 when not known
+		uint32_t m_noteSerial = 0;
 		uint32_t m_noiseState = 0x12345678;
 		std::array<float, Hardware::VoiceCount> m_rampPeak{};
 	};
