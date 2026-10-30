@@ -27,9 +27,9 @@ namespace retromulator
         static constexpr int kStripControlY = kUnitHeight + 23;
         static constexpr int kStripControlH = 26;
         static constexpr int kStripEditX    = 16;
-        static constexpr int kStripEditW    = 72;
-        static constexpr int kStripBankX    = 104;
-        static constexpr int kStripBankW    = 300;
+        static constexpr int kStripEditW    = 100;   // Edit and FX
+        static constexpr int kStripBankX    = 128;
+        static constexpr int kStripBankW    = 276;
         static constexpr int kStripNavX     = 420;
         static constexpr int kStripPatchX   = 480;
         static constexpr int kStripPatchW   = 516;

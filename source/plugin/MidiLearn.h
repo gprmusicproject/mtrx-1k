@@ -44,6 +44,13 @@ namespace retromulator
         static constexpr int kDetuneTarget = 201;
         // mono or poly, a setting likewise: the lower half of the control's range is poly, the upper mono
         static constexpr int kMonoTarget = 202;
+        // The effects, settings likewise: per rack the controls of the type it plays (0-7) and its
+        // switch (9), then the switch of the chain. A control follows the type, not its name.
+        static constexpr int kFxTargetFirst = 300;
+        static constexpr int kFxTargetsPerRack = 10;
+        static constexpr int kFxRackOnControl = 9;
+        static constexpr int kFxChainTarget = kFxTargetFirst + 3 * kFxTargetsPerRack;
+        static bool isFxTarget(const int t) { return t >= kFxTargetFirst && t <= kFxChainTarget; }
         enum BusField { BusSource = 0, BusAmount = 1, BusDestination = 2 };
         static constexpr uint16_t kMaxLimit = 16383;
 

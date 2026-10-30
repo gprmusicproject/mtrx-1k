@@ -79,8 +79,9 @@ namespace retromulator
         AboutPanel          m_about;
         // Shown while the core starts for the first time.
         StartProgressPanel  m_startProgress;
-        // Opens the patch editor under the panel.
+        // Open the patch editor under the panel, or the effects in its place.
         juce::TextButton    m_editBtn { "Edit" };
+        juce::TextButton    m_fxBtn { "FX" };
         EditPanel           m_editPanel;
         rackPanel::Theme    m_theme = rackPanel::Theme::Black;
 
@@ -136,7 +137,8 @@ namespace retromulator
         void onFirmwareMissing(SynthType type);
         void openManual();
         void setTheme(rackPanel::Theme theme);
-        void setEditOpen(bool open);
+        // the panel under the unit, open or closed, with the patch or the effects
+        void setPanelOpen(bool open, bool effects);
 
         void refreshPanel();
         void onPanelDigit(int digit);

@@ -4,6 +4,7 @@
 #include "PlaylistOrder.h"
 #include "jucePluginLib/processor.h"
 #include "synthLib/midiTypes.h"
+#include "fxLib/fxChain.h"
 #ifndef CUSTOM
 #  include "synthLib/deviceTypes.h"
 #endif
@@ -362,6 +363,12 @@ namespace retromulator
         int  getMatrixMonoSetting() const { return m_matrixMono.load(); }
         void setMatrixMono(int mono);
         bool isMatrixMono() const;
+        // The effects after the instrument, see fxLib::Chain. Kept with the instance and with a
+        // patch saved from the editor; a patch without them plays with the chain off.
+        fxLib::Chain* getFxChain() const { return m_fx.get(); }
+        // from a control of the player's keyboard through the MIDI learn: target as MidiLearn's
+        void setFxFromController(int target, int value, int max);
+        void prepareToPlay(double sampleRate, int maximumExpectedSamplesPerBlock) override;
 
         // ── Matrix patch editing ───────────────────────────────────────────
         static constexpr int kMatrixRamSlots  = 200;   // patches 000 to 199 of the instrument
@@ -497,6 +504,8 @@ namespace retromulator
 
         // GPL editor: the patch editor under the panel stays open when the window is reopened.
         bool m_editPanelOpen = false;
+        // and shows the effects instead of the patch
+        bool m_fxPageOpen = false;
 
         // Finish of the GPL editor's panel, shared by every instance.
         static bool isWhitePanel();
@@ -637,6 +646,7 @@ namespace retromulator
         std::atomic<int>     m_matrixSpread{0};
         std::atomic<int>     m_matrixDetune{0};
         std::atomic<int>     m_matrixMono{-1};
+        std::unique_ptr<fxLib::Chain> m_fx;
 
         // Voices, spread, detune and mono kept with a patch: a message of our own right after
         // the patch in the bank file. One entry per program of the loaded bank. A patch without
@@ -649,6 +659,7 @@ namespace retromulator
             int  spread = 0;
             int  detune = 0;
             int  mono = -1;
+            std::vector<uint8_t> fx;   // the effects as fxLib::Chain::write, empty when the patch has none
         };
         std::vector<MatrixPatchExtras> m_matrixExtras;
         MatrixPatchExtras matrixExtrasOf(int index) const;
@@ -657,6 +668,7 @@ namespace retromulator
         int  m_matrixRefSpread = 0;
         int  m_matrixRefDetune = 0;
         int  m_matrixRefMono = -1;
+        std::vector<uint8_t> m_matrixRefFx;
         void collectMatrixExtras(const synthLib::SysexBufferList& messages);
         void applyMatrixPatchExtras(int index);
         void takeMatrixExtrasReference(int index);

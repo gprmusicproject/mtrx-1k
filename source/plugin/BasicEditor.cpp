@@ -331,8 +331,14 @@ namespace retromulator
         m_editBtn.setClickingTogglesState(true);
         m_editBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff1f5fb0));
         m_editBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
-        m_editBtn.onClick = [this] { setEditOpen(m_editBtn.getToggleState()); };
+        m_editBtn.onClick = [this] { setPanelOpen(m_editBtn.getToggleState(), false); };
         m_canvas.addAndMakeVisible(m_editBtn);
+        m_fxBtn.setClickingTogglesState(true);
+        m_fxBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff1f5fb0));
+        m_fxBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+        m_fxBtn.setTooltip("Effects");
+        m_fxBtn.onClick = [this] { setPanelOpen(m_fxBtn.getToggleState(), true); };
+        m_canvas.addAndMakeVisible(m_fxBtn);
         m_editPanel.onProgramChanged = [this] { updateStatus(); };
         m_editPanel.setTheme(m_theme);
         m_canvas.addChildComponent(m_editPanel);
@@ -345,7 +351,7 @@ namespace retromulator
         startTimerHz(kPanelTimerHz);
 
         if(m_proc.m_editPanelOpen)
-            setEditOpen(true);
+            setPanelOpen(true, m_proc.m_fxPageOpen);
 
         // The unit powers up as a Matrix-1000. Only the first editor of an instance does
         // this, so one that was switched off stays off when its window is reopened.
@@ -443,7 +449,8 @@ namespace retromulator
         m_manualBtn .setBounds(kAboutX, kManualY, kAboutW, kAboutH);
         m_about     .setBounds(0, 0, kWidth, kHeight);
         m_startProgress.setBounds(0, 0, kWidth, kHeight);
-        m_editBtn   .setBounds(kStripEditX, y, kStripEditW, h);
+        m_editBtn   .setBounds(kStripEditX, y, kStripEditW - 48, h);
+        m_fxBtn     .setBounds(kStripEditX + kStripEditW - 44, y, 44, h);
         m_editPanel .setBounds(0, kHeight, kWidth, EditPanel::kHeight);
         m_bankCombo .setBounds(kStripBankX, y, kStripBankW, h);
         m_prevBtn   .setBounds(kStripNavX, y, 24, h);
@@ -1317,8 +1324,9 @@ namespace retromulator
             // another instance may have saved into the bank that is loaded here
             m_proc.refreshMatrixBankFromDisk();
             // a session restored while the window is open brings its own setting
-            if(m_proc.m_editPanelOpen != m_editPanel.isVisible())
-                setEditOpen(m_proc.m_editPanelOpen);
+            if(m_proc.m_editPanelOpen != m_editPanel.isVisible()
+               || m_proc.m_fxPageOpen != (m_editPanel.getPage() == EditPanel::Page::Effects))
+                setPanelOpen(m_proc.m_editPanelOpen, m_proc.m_fxPageOpen);
             updateStatus();
         }
         else
@@ -1615,13 +1623,20 @@ namespace retromulator
         refreshPanel();
     }
 
-    void BasicEditor::setEditOpen(const bool open)
+    void BasicEditor::setPanelOpen(const bool open, const bool effects)
     {
         m_proc.m_editPanelOpen = open;
-        m_editBtn.setToggleState(open, juce::dontSendNotification);
+        if(open)
+            m_proc.m_fxPageOpen = effects;
+        m_editBtn.setToggleState(open && !effects, juce::dontSendNotification);
+        m_fxBtn.setToggleState(open && effects, juce::dontSendNotification);
+        m_editPanel.setPage(m_proc.m_fxPageOpen ? EditPanel::Page::Effects : EditPanel::Page::Patch);
+        const bool resize = open != m_editPanel.isVisible();
         m_editPanel.setVisible(open);
         if(open)
             m_editPanel.refresh();
+        if(!resize)
+            return;
         // the same scale and new proportions, smaller if the window would leave the screen
         updateConstrainer();
         const double scale = juce::jmax(kMinScale, juce::jmin(m_scale, fittingScale(logicalHeight())));

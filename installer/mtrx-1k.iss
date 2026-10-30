@@ -18,7 +18,9 @@
 ;   /DManualPdf=<file>    the user manual
 
 #define AppName      "MTRX-1K"
-#define AppVersion   "0.9.9"
+#define AppVersion   "1.0.0 alpha"
+#define AppNumber    "1.0.0"
+#define AppFileVersion "1.0.0-alpha"
 #define Publisher    "GPR Music Project"
 #define ManualName   "MTRX-1K User Manual.pdf"
 #define NoteName     "Put your firmware here - read me.txt"
@@ -28,7 +30,7 @@
   #define BuildDir "..\build\win-release\Retromulator_artefacts\Release"
 #endif
 #ifndef ManualPdf
-  #define ManualPdf "..\MTRX-1K_User_Manual_v" + AppVersion + ".pdf"
+  #define ManualPdf "..\MTRX-1K_User_Manual_v" + AppFileVersion + ".pdf"
 #endif
 
 #ifdef TestRoot
@@ -57,7 +59,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#Publisher}
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#AppNumber}
 VersionInfoCompany={#Publisher}
 VersionInfoDescription={#AppName} Setup
 VersionInfoProductName={#AppName}
@@ -101,9 +103,9 @@ Compression=lzma2/max
 SolidCompression=yes
 OutputDir=..\build\installer\out
 #ifdef TestRoot
-OutputBaseFilename=MTRX-1K_{#AppVersion}_Setup_test
+OutputBaseFilename=MTRX-1K_{#AppFileVersion}_Setup_test
 #else
-OutputBaseFilename=MTRX-1K_{#AppVersion}_Setup
+OutputBaseFilename=MTRX-1K_{#AppFileVersion}_Setup
 #endif
 
 [Languages]

@@ -29,6 +29,12 @@ namespace retromulator
         // Number and name of the loaded program, shown in the header.
         void setPatchTitle(const juce::String& title);
 
+        // Two pages in the same place: the patch, and the effects that follow the instrument.
+        // The header is the same for both: the effects are saved with the patch.
+        enum class Page { Patch, Effects };
+        void setPage(Page page);
+        Page getPage() const { return m_page; }
+
         // Follows values changed from outside: the host, a controller, a program change.
         void refresh();
 
@@ -54,6 +60,10 @@ namespace retromulator
         };
 
         void addSections();
+        void addEffects();
+        void paintEffects(juce::Graphics& g);
+        // the controls of the page that is shown
+        const std::vector<std::unique_ptr<Control>>& pageControls() const { return m_page == Page::Patch ? m_controls : m_fxControls; }
         void showSave();
         void revert();
         void init();
@@ -65,6 +75,8 @@ namespace retromulator
 
         std::vector<Section> m_sections;
         std::vector<std::unique_ptr<Control>> m_controls;
+        std::vector<std::unique_ptr<Control>> m_fxControls;
+        Page m_page = Page::Patch;
         std::unique_ptr<juce::Button> m_saveBtn, m_revertBtn, m_initBtn;
         std::unique_ptr<SaveOverlay> m_saveOverlay;
 
@@ -74,6 +86,7 @@ namespace retromulator
         std::unique_ptr<MidiOverlay> m_midiOverlay;
         uint32_t m_learnRevision = 0;     // what of the MIDI learn the panel last drew
         uint32_t m_monitorCount = 0;
+        int m_fxLit = -1;                // the chain and racks that play, as the effects page last drew them
         juce::String m_learnStatus, m_profileText;
 
         juce::String m_patchTitle;

@@ -660,6 +660,7 @@ namespace retromulator
         m_paramPool->setCore(SynthType::Matrix);
         m_midiLearn = std::make_unique<MidiLearn>(*this);
         m_programRelay = std::make_unique<ProgramChangeRelay>(*this);
+        m_fx = std::make_unique<fxLib::Chain>();
 
         // The product was called TESSERACT-1000 and then MATRIX-1K. The data folder of the
         // latest of those names, with firmware, banks and calibration, is taken over under
@@ -1120,6 +1121,40 @@ namespace retromulator
             int v, s, d, m;
             return parseMatrixExtras(_msg.data(), _msg.size(), v, s, d, m);
         }
+
+        // The effects of a patch, after the message above in a bank file:
+        //   F0 7D 4D 58 10 <fxLib::Chain::write, bytes 0-127> F7   (from 1.0.0)
+        constexpr uint8_t kMatrixFxVersion = 0x10;
+
+        bool parseMatrixFx(const std::vector<uint8_t>& _msg, std::vector<uint8_t>& _fx)
+        {
+            if(_msg.size() < 7 || std::memcmp(_msg.data(), kMatrixExtras, sizeof(kMatrixExtras)) != 0 || _msg[4] != kMatrixFxVersion || _msg.back() != 0xf7)
+                return false;
+            _fx.assign(_msg.begin() + 5, _msg.end() - 1);
+            return true;
+        }
+
+        bool isMatrixFx(const std::vector<uint8_t>& _msg)
+        {
+            std::vector<uint8_t> fx;
+            return parseMatrixFx(_msg, fx);
+        }
+
+        std::vector<uint8_t> makeMatrixFx(const std::vector<uint8_t>& _fx)
+        {
+            std::vector<uint8_t> m(std::begin(kMatrixExtras), std::end(kMatrixExtras));
+            m.push_back(kMatrixFxVersion);
+            m.insert(m.end(), _fx.begin(), _fx.end());
+            m.push_back(0xf7);
+            return m;
+        }
+
+        // what a patch without effects plays: the chain and every rack off
+        std::vector<uint8_t> matrixFxOff()
+        {
+            static const std::vector<uint8_t> off = fxLib::Chain().write();
+            return off;
+        }
     }
 
     void HeadlessProcessor::collectMatrixExtras(const synthLib::SysexBufferList& messages)
@@ -1131,7 +1166,12 @@ namespace retromulator
             if(matrixLib::patch::isSinglePatch(msg.data(), msg.size()))
                 m_matrixExtras.emplace_back();
             else if(!m_matrixExtras.empty() && parseMatrixExtras(msg.data(), msg.size(), voices, spread, detune, mono))
-                m_matrixExtras.back() = {true, voices, spread, detune, mono};
+            {
+                auto fx = std::move(m_matrixExtras.back().fx);
+                m_matrixExtras.back() = {true, voices, spread, detune, mono, std::move(fx)};
+            }
+            else if(!m_matrixExtras.empty())
+                parseMatrixFx(msg, m_matrixExtras.back().fx);
         }
     }
 
@@ -1155,6 +1195,8 @@ namespace retromulator
         setMatrixSpread(e.spread);
         setMatrixDetune(e.detune);
         setMatrixMono(e.mono);
+        if(m_fx && (e.fx.empty() || !m_fx->read(e.fx)))
+            m_fx->reset();
         takeMatrixExtrasReference(index);
     }
 
@@ -1165,6 +1207,7 @@ namespace retromulator
         m_matrixRefSpread = e.spread;
         m_matrixRefDetune = e.detune;
         m_matrixRefMono = e.mono;
+        m_matrixRefFx = e.fx.empty() ? matrixFxOff() : e.fx;
     }
 
     // ── Preset loading ────────────────────────────────────────────────────────
@@ -3373,7 +3416,8 @@ namespace retromulator
                                     : m_matrixMono.load() != m_matrixRefMono;
         return (m_paramPool && m_paramPool->hasPatchEdits())
             || m_matrixVoices != m_matrixRefVoices || m_matrixSpread.load() != m_matrixRefSpread
-            || m_matrixDetune.load() != m_matrixRefDetune || monoEdited;
+            || m_matrixDetune.load() != m_matrixRefDetune || monoEdited
+            || (m_fx && m_fx->write() != m_matrixRefFx);
     }
 
     bool HeadlessProcessor::saveMatrixPatch(const std::string& bankPath, const int slot, const std::string& name)
@@ -3412,6 +3456,12 @@ namespace retromulator
             messages[pos + 1] = extras;
         else
             messages.insert(messages.begin() + static_cast<std::ptrdiff_t>(pos + 1), extras);
+        // and the effects after those
+        const auto fx = makeMatrixFx(m_fx ? m_fx->write() : matrixFxOff());
+        if(pos + 2 < messages.size() && isMatrixFx(messages[pos + 2]))
+            messages[pos + 2] = fx;
+        else
+            messages.insert(messages.begin() + static_cast<std::ptrdiff_t>(pos + 2), fx);
         if(!writeSysexMessages(file, messages))
             return false;
 
@@ -3442,7 +3492,10 @@ namespace retromulator
         {
             messages.push_back(matrixLib::patch::encode(slot == 0 ? data : init, matrixLib::patch::OpSinglePatch, static_cast<uint8_t>(slot)));
             if(slot == 0)
+            {
                 messages.push_back(makeMatrixExtras(m_matrixVoices, m_matrixSpread.load(), m_matrixDetune.load(), m_matrixMono.load()));
+                messages.push_back(makeMatrixFx(m_fx ? m_fx->write() : matrixFxOff()));
+            }
         }
         if(!writeSysexMessages(file, messages))
             return "The bank file could not be written.";
@@ -3464,6 +3517,8 @@ namespace retromulator
         setMatrixSpread(0);
         setMatrixDetune(0);
         setMatrixMono(-1);
+        if(m_fx)
+            m_fx->reset();
         // goes out as the loaded program with every parameter edited
         sendBankMessage(m_currentProgram);
         return true;
@@ -4552,6 +4607,51 @@ namespace retromulator
         processDeferredResend();
 
         Processor::processBlock(buffer, midi);
+
+        // the effects take the instrument's stereo output; the tempo is the one the LFO sync follows
+        if(m_synthType == SynthType::Matrix && m_fx && buffer.getNumChannels() >= 2)
+        {
+            const auto* dev = getMatrixDevice();
+            m_fx->process(buffer.getWritePointer(0), buffer.getWritePointer(1), buffer.getNumSamples(), dev ? dev->getHostBpm() : 120.0);
+        }
+    }
+
+    // ── Effects ─────────────────────────────────────────────────────────────────
+
+    void HeadlessProcessor::prepareToPlay(const double sampleRate, const int maximumExpectedSamplesPerBlock)
+    {
+        pluginLib::Processor::prepareToPlay(sampleRate, maximumExpectedSamplesPerBlock);
+        if(m_fx)
+            m_fx->prepare(sampleRate, juce::jmax(512, maximumExpectedSamplesPerBlock));
+    }
+
+    void HeadlessProcessor::setFxFromController(const int target, const int value, const int max)
+    {
+        if(!m_fx || max <= 0)
+            return;
+        // the switches: the upper half of the control's travel is on
+        const bool on = value * 2 > max;
+        if(target == MidiLearn::kFxChainTarget)
+        {
+            m_fx->setChainOn(on);
+            return;
+        }
+        const int i = target - MidiLearn::kFxTargetFirst;
+        const int rack = i / MidiLearn::kFxTargetsPerRack, control = i % MidiLearn::kFxTargetsPerRack;
+        if(i < 0 || rack >= fxLib::RackCount)
+            return;
+        if(control == MidiLearn::kFxRackOnControl)
+        {
+            m_fx->setRackOn(rack, on);
+            return;
+        }
+        const auto& info = fxLib::typeInfo(rack, m_fx->getType(rack));
+        if(control >= info.controlCount)
+            return;
+        if(info.controls[static_cast<size_t>(control)].kind == fxLib::ControlKind::Switch)
+            m_fx->setValue(rack, control, on ? 1.0f : 0.0f);
+        else
+            m_fx->setValue(rack, control, static_cast<float>(juce::jlimit(0, max, value)) / static_cast<float>(max));
     }
 
     // ── Deferred resend (pre-audio guard + boot delay) ─────────────────────────
@@ -4675,6 +4775,8 @@ namespace retromulator
     static constexpr int32_t kMatrixEditorMagic = 0x4445584D;
     // 'MXML': the controller assignments of the MIDI learn in use, as text.
     static constexpr int32_t kMatrixLearnMagic = 0x4C4D584D;
+    // 'MXFX': the effects, as fxLib::Chain::write.
+    static constexpr int32_t kMatrixFxMagic = 0x58464D58;
     // "E88D": the board. Written last, and read back from the tail before the device is
     // created, so the boot picks the right one without parsing the blocks in between.
     static constexpr int32_t kEmu88BoardMagic = 0x44383845;
@@ -4759,13 +4861,20 @@ namespace retromulator
         if(m_synthType == SynthType::Matrix)
         {
             appendInt32(destData, kMatrixEditorMagic);
-            appendInt32(destData, (m_editPanelOpen ? 1 : 0) | (isMatrixInitPatch() ? 2 : 0));
+            appendInt32(destData, (m_editPanelOpen ? 1 : 0) | (isMatrixInitPatch() ? 2 : 0) | (m_fxPageOpen ? 4 : 0));
 
             // ['MXML':int32][length:int32][text]
             if(m_midiLearn)
             {
                 appendInt32(destData, kMatrixLearnMagic);
                 appendString(destData, m_midiLearn->toStateString().toStdString());
+            }
+
+            // ['MXFX':int32][length:int32][bytes]
+            if(m_fx)
+            {
+                appendInt32(destData, kMatrixFxMagic);
+                appendBytes(destData, m_fx->write());
             }
         }
 
@@ -5188,6 +5297,7 @@ namespace retromulator
         {
             m_editPanelOpen   = (editorFlags & 1) != 0;
             m_matrixInitPatch = (editorFlags & 2) != 0;
+            m_fxPageOpen      = (editorFlags & 4) != 0;
         }
         else
         {
@@ -5213,10 +5323,23 @@ namespace retromulator
                 m_midiLearn->fromStateString({});
         }
 
+        // The effects (optional: a session saved before 1.0.0 had none, and plays without).
+        const int fxStart = offset;
+        int32_t fxMagic = 0;
+        std::vector<uint8_t> fxState;
+        if(newType == SynthType::Matrix
+           && !(readInt32(bytes, sizeInBytes, offset, fxMagic) && fxMagic == kMatrixFxMagic && readBytes(bytes, sizeInBytes, offset, fxState)))
+        {
+            offset = fxStart;
+            fxState.clear();
+        }
+
         // The state carries the bank as it was when it was saved. Its file is what the
         // panel saves into and what other instances read, so the file has the say.
         if(newType == SynthType::Matrix)
             refreshMatrixBankFromDisk();
+        if(newType == SynthType::Matrix && m_fx && (fxState.empty() || !m_fx->read(fxState)))
+            m_fx->reset();
 
         // Restore the 88emu per-part programs and the edited part (optional).
         int restorePart = -1;

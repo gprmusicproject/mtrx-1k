@@ -1454,7 +1454,7 @@ namespace retromulator
         template<typename Fn> void forEachTarget(Fn&& fn) const
         {
             std::vector<Control::LearnTarget> targets;
-            for(const auto& c : m_panel.m_controls)
+            for(const auto& c : m_panel.pageControls())
             {
                 targets.clear();
                 c->learnTargets(targets);
@@ -1843,6 +1843,390 @@ namespace retromulator
         bool m_confirmClear = false;
     };
 
+    // ── Effects page ──────────────────────────────────────────────────────────
+
+    namespace
+    {
+        // Layout of the effects page: the chain on top, then the three racks in the order the
+        // sound goes through them, each drawn as a rack unit with ears.
+        constexpr int kFxLeft     = 10;
+        constexpr int kFxWidth    = rackPanel::kWidth - 2 * kFxLeft;
+        constexpr int kFxBarY     = 42;
+        constexpr int kFxBarH     = 40;
+        constexpr int kRackTop    = 90;
+        constexpr int kRackHeight = 148;
+        constexpr int kRackGap    = 8;
+        constexpr int kRackEar    = 28;
+        constexpr int kFxNameX    = kFxLeft + kRackEar + 16;
+        constexpr int kFxTypeX    = kFxLeft + 262;
+        constexpr int kFxTypeW    = 80;
+        constexpr int kFxKnobX    = kFxLeft + 548;
+        constexpr int kFxKnobW    = 62;
+        // in a rack: the knobs from this height, their centres at the other; the keys of the
+        // types and the switch of the rack are centred on the same line
+        constexpr int kFxKnobTop    = 42;
+        constexpr int kFxKnobCentre = 88;
+        constexpr int kFxKeyHeight  = 26;
+        constexpr int kFxKeyGap     = 8;
+
+        // where the keys of the types start in a rack, in rows of three
+        int typeKeysTop(const int rack)
+        {
+            const int rows = (fxLib::typeCount(rack) + 2) / 3;
+            return kFxKnobCentre - (rows * kFxKeyHeight + (rows - 1) * kFxKeyGap) / 2;
+        }
+        constexpr int kFxKnobH    = 100;
+
+        int rackY(const int rack) { return kRackTop + rack * (kRackHeight + kRackGap); }
+
+        fxLib::Chain* chainOf(const EditPanel::Context& ctx) { return ctx.proc.getFxChain(); }
+
+        // the tempo a synced delay follows, as the LFO sync has it
+        double fxTempo(HeadlessProcessor& proc)
+        {
+            const auto* dev = proc.getMatrixDevice();
+            return dev ? static_cast<double>(dev->getHostBpm()) : 120.0;
+        }
+
+        // A key with a lamp, the look of the keys of the header
+        void drawLampKey(juce::Graphics& g, juce::Rectangle<float> r, const juce::String& legend, const bool lit, const bool enabled)
+        {
+            g.setColour(juce::Colour(0xff020202));
+            g.fillRoundedRectangle(r, 3.5f);
+            r = r.reduced(1.5f);
+            g.setGradientFill(juce::ColourGradient(juce::Colour(kKeyTop), 0.0f, r.getY(), juce::Colour(kKeyBottom), 0.0f, r.getBottom(), false));
+            g.fillRoundedRectangle(r, 2.5f);
+            drawLed(g, r.getX() + 10.0f, r.getCentreY(), lit && enabled);
+            g.setColour(juce::Colour(kKeyText).withAlpha(enabled ? 1.0f : 0.4f));
+            g.setFont(sans(10.5f, true));
+            g.drawFittedText(legend, r.withTrimmedLeft(18.0f).toNearestInt(), juce::Justification::centred, 1, 0.7f);
+        }
+
+        // The switch of the chain or of one rack: a key with a lamp. Assignable.
+        class FxPowerKey final : public EditPanel::Control
+        {
+        public:
+            FxPowerKey(EditPanel::Context& context, const int rack) : Control(context), m_rack(rack)
+            {
+                setTitle(rack < 0 ? juce::String("FX chain") : juce::String(fxLib::rackName(rack)) + " on");
+                setMouseCursor(juce::MouseCursor::PointingHandCursor);
+            }
+
+            void refresh() override
+            {
+                const int v = on() ? 1 : 0;
+                if(v != m_shown)
+                {
+                    m_shown = v;
+                    repaint();
+                }
+            }
+
+            void learnTargets(std::vector<LearnTarget>& out) const override
+            {
+                out.push_back({m_rack < 0 ? MidiLearn::kFxChainTarget : MidiLearn::kFxTargetFirst + m_rack * MidiLearn::kFxTargetsPerRack + MidiLearn::kFxRackOnControl, getLocalBounds()});
+            }
+
+            void paint(juce::Graphics& g) override
+            {
+                drawLampKey(g, getLocalBounds().toFloat(), m_rack < 0 ? "Chain On" : "On", on(), chainOf(ctx) != nullptr);
+            }
+
+            void mouseDown(const juce::MouseEvent&) override
+            {
+                if(auto* c = chainOf(ctx))
+                {
+                    if(m_rack < 0)
+                        c->setChainOn(!c->isChainOn());
+                    else
+                        c->setRackOn(m_rack, !c->isRackOn(m_rack));
+                    refresh();
+                }
+            }
+
+        private:
+            bool on() const
+            {
+                const auto* c = chainOf(ctx);
+                return c && (m_rack < 0 ? c->isChainOn() : c->isRackOn(m_rack));
+            }
+
+            int m_rack;
+            int m_shown = -1;
+        };
+
+        // One type of a rack: a key, lit when the rack plays it
+        class FxTypeKey final : public EditPanel::Control
+        {
+        public:
+            FxTypeKey(EditPanel::Context& context, const int rack, const int type) : Control(context), m_rack(rack), m_type(type)
+            {
+                setTitle(juce::String(fxLib::rackName(rack)) + " " + fxLib::typeInfo(rack, type).name);
+                setMouseCursor(juce::MouseCursor::PointingHandCursor);
+            }
+
+            void refresh() override
+            {
+                const auto* c = chainOf(ctx);
+                const int v = c && c->getType(m_rack) == m_type ? 1 : 0;
+                if(v != m_shown)
+                {
+                    m_shown = v;
+                    repaint();
+                }
+            }
+
+            void paint(juce::Graphics& g) override
+            {
+                const auto* c = chainOf(ctx);
+                drawLampKey(g, getLocalBounds().toFloat(), fxLib::typeInfo(m_rack, m_type).name, c && c->getType(m_rack) == m_type, c != nullptr);
+            }
+
+            void mouseDown(const juce::MouseEvent&) override
+            {
+                if(auto* c = chainOf(ctx))
+                {
+                    c->setType(m_rack, m_type);
+                    if(auto* p = getParentComponent())
+                        p->repaint(kFxLeft, rackY(m_rack), kFxWidth, kRackHeight);
+                }
+            }
+
+        private:
+            int m_rack, m_type;
+            int m_shown = -1;
+        };
+
+        // One control place of a rack: what it is follows the type the rack plays, a knob or a
+        // switch, or nothing when the type has fewer controls. Assignable by its place.
+        class FxControl final : public EditPanel::Control
+        {
+        public:
+            FxControl(EditPanel::Context& context, const int rack, const int control) : Control(context), m_rack(rack), m_control(control)
+            {
+                setTitle(juce::String(fxLib::rackName(rack)) + " control " + juce::String(control + 1));
+            }
+
+            void refresh() override
+            {
+                const auto* c = chainOf(ctx);
+                if(!c)
+                    return;
+                const int type = c->getType(m_rack);
+                const auto text = exists() ? c->valueText(m_rack, type, m_control) : std::string();
+                const float v = c->getValue(m_rack, type, m_control);
+                const bool reachable = reachableDivision();
+                if(type != m_shownType || v != m_shownValue || text != m_shownText || reachable != m_shownReachable)
+                {
+                    m_shownType = type;
+                    m_shownValue = v;
+                    m_shownText = text;
+                    m_shownReachable = reachable;
+                    setMouseCursor(exists() ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+                    repaint();
+                }
+            }
+
+            void learnTargets(std::vector<LearnTarget>& out) const override
+            {
+                if(exists())
+                    out.push_back({MidiLearn::kFxTargetFirst + m_rack * MidiLearn::kFxTargetsPerRack + m_control, getLocalBounds()});
+            }
+
+            void paint(juce::Graphics& g) override
+            {
+                const auto* c = chainOf(ctx);
+                if(!c || !exists())
+                    return;
+                const auto& st = style();
+                const int type = c->getType(m_rack);
+                const auto& info = fxLib::typeInfo(m_rack, type).controls[static_cast<size_t>(m_control)];
+                auto b = getLocalBounds();
+                g.setColour(juce::Colour(st.label));
+                g.setFont(sans(10.0f));
+                g.drawFittedText(info.name, b.removeFromTop(14), juce::Justification::centred, 1, 0.7f);
+                const float v = c->getValue(m_rack, type, m_control);
+
+                if(info.kind == fxLib::ControlKind::Switch)
+                {
+                    drawLampKey(g, juce::Rectangle<float>(52.0f, 22.0f).withCentre({b.toFloat().getCentreX(), static_cast<float>(kFxKnobCentre - kFxKnobTop)}), v >= 0.5f ? "On" : "Off", v >= 0.5f, true);
+                    return;
+                }
+
+                const auto area = b.removeFromTop(64).toFloat();
+                const float r = juce::jmin(area.getWidth(), area.getHeight()) * 0.5f - 3.0f;
+                const float cx = area.getCentreX();
+                const float cy = area.getCentreY();
+                constexpr float sweep = juce::MathConstants<float>::pi * 0.75f;
+
+                juce::Path track;
+                track.addCentredArc(cx, cy, r, r, 0.0f, -sweep, sweep, true);
+                g.setColour(juce::Colour(st.knobTrack));
+                g.strokePath(track, juce::PathStrokeType(3.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                if(v > 0.0f)
+                {
+                    juce::Path arc;
+                    arc.addCentredArc(cx, cy, r, r, 0.0f, -sweep, -sweep + v * sweep * 2.0f, true);
+                    g.setColour(juce::Colour(st.knobArc));
+                    g.strokePath(arc, juce::PathStrokeType(3.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                }
+                const float face = r - 5.5f;
+                g.setGradientFill(juce::ColourGradient(juce::Colour(st.knobFaceTop), cx, cy - face, juce::Colour(st.knobFaceBottom), cx, cy + face, false));
+                g.fillEllipse(cx - face, cy - face, face * 2, face * 2);
+                // the pointer
+                const float angle = -sweep + v * sweep * 2.0f;
+                g.setColour(juce::Colour(st.value).withAlpha(0.8f));
+                g.drawLine(cx + std::sin(angle) * face * 0.55f, cy - std::cos(angle) * face * 0.55f,
+                           cx + std::sin(angle) * face * 0.92f, cy - std::cos(angle) * face * 0.92f, 2.0f);
+
+                // the value under it; a synced delay time the delay cannot reach in red
+                g.setColour(reachableDivision() ? juce::Colour(st.value) : juce::Colour(kLedOn));
+                g.setFont(sans(10.5f, true));
+                g.drawFittedText(juce::String(m_shownText.empty() ? c->valueText(m_rack, type, m_control) : m_shownText), b.removeFromTop(16), juce::Justification::centred, 1, 0.7f);
+            }
+
+            void mouseDown(const juce::MouseEvent&) override
+            {
+                auto* c = chainOf(ctx);
+                if(!c || !exists())
+                    return;
+                if(isSwitch())
+                {
+                    c->setValue(m_rack, m_control, c->getValue(m_rack, m_control) >= 0.5f ? 0.0f : 1.0f);
+                    refresh();
+                    return;
+                }
+                m_dragStart = c->getValue(m_rack, m_control);
+                m_dragging = true;
+            }
+
+            void mouseDrag(const juce::MouseEvent& e) override
+            {
+                auto* c = chainOf(ctx);
+                if(!c || !m_dragging)
+                    return;
+                // the whole range over 160 pixels, a quarter of that speed with shift
+                const auto moved = static_cast<float>(e.getDistanceFromDragStartX() - e.getDistanceFromDragStartY());
+                const float pixels = e.mods.isShiftDown() ? 640.0f : 160.0f;
+                set(m_dragStart + moved / pixels);
+            }
+
+            void mouseUp(const juce::MouseEvent&) override
+            {
+                m_dragging = false;
+            }
+
+            void mouseDoubleClick(const juce::MouseEvent&) override
+            {
+                auto* c = chainOf(ctx);
+                if(!c || !exists() || isSwitch())
+                    return;
+                set(fxLib::typeInfo(m_rack, c->getType(m_rack)).controls[static_cast<size_t>(m_control)].initial);
+            }
+
+            void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
+            {
+                auto* c = chainOf(ctx);
+                if(!c || !exists() || isSwitch() || wheel.deltaY == 0.0f)
+                    return;
+                // a synced time steps by one division, anything else by a hundredth
+                const int steps = info().steps;
+                const float step = isSyncedTime() ? 1.0f / static_cast<float>(fxLib::delayDivisionCount() - 1)
+                                 : (steps > 1 ? 1.0f / static_cast<float>(steps - 1) : 0.01f);
+                set(c->getValue(m_rack, m_control) + (wheel.deltaY > 0.0f ? step : -step));
+            }
+
+        private:
+            bool exists() const
+            {
+                const auto* c = chainOf(ctx);
+                return c && m_control < fxLib::typeInfo(m_rack, c->getType(m_rack)).controlCount;
+            }
+
+            const fxLib::ControlInfo& info() const
+            {
+                const auto* c = chainOf(ctx);
+                return fxLib::typeInfo(m_rack, c ? c->getType(m_rack) : 0).controls[static_cast<size_t>(m_control)];
+            }
+
+            bool isSwitch() const
+            {
+                const auto* c = chainOf(ctx);
+                return c && fxLib::typeInfo(m_rack, c->getType(m_rack)).controls[static_cast<size_t>(m_control)].kind == fxLib::ControlKind::Switch;
+            }
+
+            bool isSyncedTime() const
+            {
+                const auto* c = chainOf(ctx);
+                if(!c || m_rack != fxLib::RackDelay || !exists())
+                    return false;
+                const int type = c->getType(m_rack);
+                return fxLib::typeInfo(m_rack, type).controls[static_cast<size_t>(m_control)].unit == fxLib::ControlUnit::Time
+                    && c->getValue(m_rack, type, fxLib::delaySyncControl(type)) >= 0.5f;
+            }
+
+            bool reachableDivision() const
+            {
+                const auto* c = chainOf(ctx);
+                return !isSyncedTime() || c->isDelayDivisionReachable(c->getType(m_rack), m_control, fxTempo(ctx.proc));
+            }
+
+            void set(const float v)
+            {
+                if(auto* c = chainOf(ctx))
+                {
+                    float value = juce::jlimit(0.0f, 1.0f, v);
+                    // a synced time rests on a division
+                    if(isSyncedTime())
+                        value = static_cast<float>(fxLib::delayDivisionOf(value)) / static_cast<float>(fxLib::delayDivisionCount() - 1);
+                    // and a knob that clicks on a setting
+                    else if(const int steps = info().steps; steps > 1)
+                        value = std::round(value * static_cast<float>(steps - 1)) / static_cast<float>(steps - 1);
+                    c->setValue(m_rack, m_control, value);
+                    refresh();
+                }
+            }
+
+            int m_rack, m_control;
+            int m_shownType = -1;
+            float m_shownValue = -1.0f;
+            std::string m_shownText;
+            bool m_shownReachable = true;
+            float m_dragStart = 0.0f;
+            bool m_dragging = false;
+        };
+
+        // The tempo a synced delay follows
+        class FxTempo final : public EditPanel::Control
+        {
+        public:
+            explicit FxTempo(EditPanel::Context& context) : Control(context) {}
+
+            void refresh() override
+            {
+                const int bpm = juce::roundToInt(fxTempo(ctx.proc) * 10.0);
+                if(bpm != m_shown)
+                {
+                    m_shown = bpm;
+                    repaint();
+                }
+            }
+
+            void paint(juce::Graphics& g) override
+            {
+                g.setColour(juce::Colour(style().label));
+                g.setFont(sans(9.5f));
+                g.drawText("Delay sync tempo", getLocalBounds().removeFromTop(12), juce::Justification::centredRight, false);
+                g.setColour(juce::Colour(style().value));
+                g.setFont(sans(12.0f, true));
+                g.drawText(juce::String(m_shown / 10.0, 1) + " BPM", getLocalBounds().withTrimmedTop(12), juce::Justification::centredRight, false);
+            }
+
+        private:
+            int m_shown = -1;
+        };
+    }
+
     // ── EditPanel ─────────────────────────────────────────────────────────────
 
     namespace
@@ -1869,6 +2253,7 @@ namespace retromulator
         : m_proc(proc), m_context(new Context{proc, &styleFor(rackPanel::Theme::Black)})
     {
         addSections();
+        addEffects();
 
         auto save = std::make_unique<TextKey>("Save");
         save->onClick = [this] { showSave(); };
@@ -2109,8 +2494,21 @@ namespace retromulator
             for(auto& c : m_controls)
                 c->rebind();
         }
-        for(auto& c : m_controls)
+        for(auto& c : pageControls())
             c->refresh();
+
+        // the chain drawn on the effects page lights the racks that play
+        if(m_page == Page::Effects)
+        {
+            int lit = 0;
+            if(const auto* chain = m_proc.getFxChain())
+                lit = (chain->isChainOn() ? 1 : 0) | (chain->isRackOn(0) ? 2 : 0) | (chain->isRackOn(1) ? 4 : 0) | (chain->isRackOn(2) ? 8 : 0);
+            if(lit != m_fxLit)
+            {
+                m_fxLit = lit;
+                repaint(0, kFxBarY, getWidth(), kFxBarH);
+            }
+        }
 
         const bool usable = core == SynthType::Matrix && !m_proc.m_isBooting.load() && m_proc.getProgramCount() > 0;
         m_saveBtn->setEnabled(usable);
@@ -2206,7 +2604,7 @@ namespace retromulator
         // header: title, loaded patch, edited lamp
         g.setColour(juce::Colour(st.title));
         g.setFont(sans(12.5f, true));
-        g.drawText("PATCH EDIT", kLeft + 4, 7, 100, 22, juce::Justification::centredLeft, false);
+        g.drawText(m_page == Page::Patch ? "PATCH EDIT" : "EFFECTS", kLeft + 4, 7, 100, 22, juce::Justification::centredLeft, false);
 
         const juce::Rectangle<float> screen(118.0f, 6.0f, 240.0f, 24.0f);
         drawScreen(g, screen);
@@ -2233,6 +2631,12 @@ namespace retromulator
             g.drawFittedText(m_profileText, x, 15, w, 15, juce::Justification::centredRight, 1, 0.7f);
         }
 
+        if(m_page == Page::Effects)
+        {
+            paintEffects(g);
+            return;
+        }
+
         for(const auto& s : m_sections)
         {
             const auto r = s.bounds.toFloat();
@@ -2255,5 +2659,132 @@ namespace retromulator
         g.drawText("Source",      kRightX + 22,  y, 90, 11, juce::Justification::centred, false);
         g.drawText("Amount",      kRightX + 116, y, 72, 11, juce::Justification::centred, false);
         g.drawText("Destination", kRightX + 192, y, 96, 11, juce::Justification::centred, false);
+    }
+
+    void EditPanel::setPage(const Page page)
+    {
+        if(page == m_page)
+            return;
+        m_page = page;
+        for(auto& c : m_controls)
+            c->setVisible(page == Page::Patch);
+        for(auto& c : m_fxControls)
+            c->setVisible(page == Page::Effects);
+        for(auto& c : pageControls())
+            c->refresh();
+        m_learnLayer->repaint();
+        repaint();
+    }
+
+    void EditPanel::addEffects()
+    {
+        auto& ctx = *m_context;
+        const auto add = [this](std::unique_ptr<Control> c, const juce::Rectangle<int> bounds)
+        {
+            c->setBounds(bounds);
+            addChildComponent(*c);
+            m_fxControls.push_back(std::move(c));
+        };
+
+        add(std::make_unique<FxPowerKey>(ctx, -1), {kFxLeft + 110, kFxBarY + 8, 104, 24});
+        add(std::make_unique<FxTempo>(ctx), {kFxLeft + kFxWidth - 190, kFxBarY + 6, 176, 28});
+
+        for(int r = 0; r < fxLib::RackCount; ++r)
+        {
+            const int y = rackY(r);
+            add(std::make_unique<FxPowerKey>(ctx, r), {kFxNameX, y + kFxKnobCentre - kFxKeyHeight / 2, 70, kFxKeyHeight});
+            // the types in rows of three
+            for(int t = 0; t < fxLib::typeCount(r); ++t)
+                add(std::make_unique<FxTypeKey>(ctx, r, t), {kFxTypeX + (t % 3) * (kFxTypeW + 6), y + typeKeysTop(r) + (t / 3) * (kFxKeyHeight + kFxKeyGap), kFxTypeW, kFxKeyHeight});
+            for(int c = 0; c < fxLib::MaxControls; ++c)
+                add(std::make_unique<FxControl>(ctx, r, c), {kFxKnobX + c * kFxKnobW, y + kFxKnobTop, kFxKnobW, kFxKnobH});
+        }
+    }
+
+    // The chain and three rack units, in the finish of the panel
+    void EditPanel::paintEffects(juce::Graphics& g)
+    {
+        const auto& st = *m_context->style;
+        const auto* chain = m_proc.getFxChain();
+
+        // the chain: the order of the racks and its switch
+        const juce::Rectangle<float> bar(static_cast<float>(kFxLeft), static_cast<float>(kFxBarY), static_cast<float>(kFxWidth), static_cast<float>(kFxBarH));
+        g.setColour(juce::Colour(st.frame));
+        g.fillRoundedRectangle(bar, 5.0f);
+        g.setColour(juce::Colour(st.frameOutline));
+        g.drawRoundedRectangle(bar.reduced(0.5f), 5.0f, 1.0f);
+        g.setColour(juce::Colour(st.title));
+        g.setFont(sans(10.5f, true));
+        g.drawText("FX CHAIN", kFxLeft + 12, kFxBarY, 90, kFxBarH, juce::Justification::centredLeft, false);
+
+        // instrument > modulation > delay > reverb > out, the racks that play lit
+        const char* const stages[] = {"MTRX-1K", "MODULATION", "DELAY", "REVERB", "OUT"};
+        float x = static_cast<float>(kFxLeft + 250);
+        const float cy = static_cast<float>(kFxBarY + kFxBarH / 2);
+        g.setFont(sans(10.0f, true));
+        for(int i = 0; i < 5; ++i)
+        {
+            const bool lit = i == 0 || i == 4 || (chain && chain->isChainOn() && chain->isRackOn(i - 1));
+            const float w = juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), stages[i]) + 16.0f;
+            const juce::Rectangle<float> box(x, cy - 10.0f, w, 20.0f);
+            g.setColour(juce::Colour(lit ? st.knobArc : st.knobTrack).withAlpha(lit ? 0.9f : 0.6f));
+            g.drawRoundedRectangle(box, 3.0f, 1.2f);
+            g.setColour(juce::Colour(lit ? st.value : st.label).withAlpha(lit ? 1.0f : 0.5f));
+            g.drawText(stages[i], box.toNearestInt(), juce::Justification::centred, false);
+            x += w;
+            if(i < 4)
+            {
+                juce::Path arrow;
+                arrow.startNewSubPath(x + 6.0f, cy);
+                arrow.lineTo(x + 22.0f, cy);
+                g.setColour(juce::Colour(st.label).withAlpha(0.7f));
+                g.strokePath(arrow, juce::PathStrokeType(1.2f));
+                juce::Path head;
+                head.addTriangle(x + 23.0f, cy, x + 18.0f, cy - 3.5f, x + 18.0f, cy + 3.5f);
+                g.fillPath(head);
+                x += 28.0f;
+            }
+        }
+
+        // the racks
+        for(int r = 0; r < fxLib::RackCount; ++r)
+        {
+            const auto y = static_cast<float>(rackY(r));
+            const juce::Rectangle<float> unit(static_cast<float>(kFxLeft), y, static_cast<float>(kFxWidth), static_cast<float>(kRackHeight));
+
+            // the face and its ears with two screws each
+            g.setColour(juce::Colours::black.withAlpha(0.35f));
+            g.fillRoundedRectangle(unit.translated(0.0f, 2.0f), 4.0f);
+            g.setGradientFill(juce::ColourGradient(juce::Colour(st.knobFaceTop).interpolatedWith(juce::Colour(st.frame), 0.6f), 0.0f, y,
+                                                   juce::Colour(st.frame), 0.0f, y + kRackHeight, false));
+            g.fillRoundedRectangle(unit, 4.0f);
+            g.setColour(juce::Colour(st.frameOutline));
+            g.drawRoundedRectangle(unit.reduced(0.5f), 4.0f, 1.0f);
+            for(const float ex : {unit.getX(), unit.getRight() - kRackEar})
+            {
+                const juce::Rectangle<float> ear(ex, y, static_cast<float>(kRackEar), static_cast<float>(kRackHeight));
+                g.setColour(juce::Colour(st.backgroundBottom).withAlpha(0.8f));
+                g.fillRect(ear.reduced(0.0f, 1.0f));
+                for(const float sy : {y + 22.0f, y + kRackHeight - 22.0f})
+                {
+                    const float sx = ear.getCentreX();
+                    g.setColour(juce::Colours::black.withAlpha(0.6f));
+                    g.fillRoundedRectangle(sx - 6.0f, sy - 4.0f, 12.0f, 8.0f, 4.0f);
+                    g.setColour(juce::Colour(st.knobTrack));
+                    g.fillEllipse(sx - 3.0f, sy - 3.0f, 6.0f, 6.0f);
+                }
+            }
+
+            // name and rule, the label of the types
+            g.setColour(juce::Colour(st.title));
+            g.setFont(sans(15.0f, true));
+            g.drawText(juce::String(fxLib::rackName(r)).toUpperCase(), kFxNameX, static_cast<int>(y) + 12, 200, 22, juce::Justification::centredLeft, false);
+            g.setColour(juce::Colour(st.title).withAlpha(0.55f));
+            g.fillRect(static_cast<float>(kFxNameX), y + 35.0f, static_cast<float>(kFxWidth - 2 * (kRackEar + 16)), 1.2f);
+            g.setColour(juce::Colour(st.label));
+            g.setFont(sans(9.5f));
+            g.drawText("Type", kFxTypeX, static_cast<int>(y) + typeKeysTop(r) - 17, 80, 14, juce::Justification::centredLeft, false);
+            g.drawText(juce::String(r + 1), kFxLeft + kFxWidth - kRackEar - 40, static_cast<int>(y) + 14, 24, 14, juce::Justification::centredRight, false);
+        }
     }
 }

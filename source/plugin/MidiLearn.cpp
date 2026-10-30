@@ -390,6 +390,15 @@ namespace retromulator
             return "Voice Detune";
         if(target == kMonoTarget)
             return "Mono / Poly";
+        if(target == kFxChainTarget)
+            return "FX Chain On";
+        if(isFxTarget(target))
+        {
+            static const char* const racks[3] = {"Modulation", "Delay", "Reverb"};
+            const int i = target - kFxTargetFirst;
+            const int c = i % kFxTargetsPerRack;
+            return juce::String("FX ") + racks[i / kFxTargetsPerRack] + (c == kFxRackOnControl ? juce::String(" On") : " " + juce::String(c + 1));
+        }
         if(target >= kBusTargetFirst)
         {
             static const char* const fields[3] = {"Source", "Amount", "Destination"};
@@ -763,6 +772,11 @@ namespace retromulator
             m_proc.setMatrixDetuneFromController(value, m.max);
             return;
         }
+        if(isFxTarget(m.target))
+        {
+            m_proc.setFxFromController(m.target, value, m.max);
+            return;
+        }
         if(m.target == kMonoTarget)
         {
             if(m.max > 0)
@@ -837,7 +851,7 @@ namespace retromulator
             else
             {
                 m.target = e->getIntAttribute("param", -1);
-                if(m.target != kSpreadTarget && m.target != kDetuneTarget && m.target != kMonoTarget && (m.target < 0 || !matrixLib::patch::findParam(static_cast<uint8_t>(m.target))))
+                if(m.target != kSpreadTarget && m.target != kDetuneTarget && m.target != kMonoTarget && !isFxTarget(m.target) && (m.target < 0 || !matrixLib::patch::findParam(static_cast<uint8_t>(m.target))))
                     continue;
             }
 
