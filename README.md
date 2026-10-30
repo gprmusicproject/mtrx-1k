@@ -6,6 +6,18 @@ MTRX-1K is made by **GPR Music Project**. It is a modified version of [Retromula
 
 MTRX-1K is not affiliated with, endorsed by or connected to Oberheim. Oberheim and Matrix-1000 are trademarks of their owners and are named here only to say what the software emulates.
 
+![MTRX-1K with the patch editor open, in the black finish](docs/images/editor.png)
+
+## Pictures
+
+The rack panel, in the white finish, with the selectors of bank and patch under it:
+
+![The rack panel of MTRX-1K in the white finish](docs/images/panel.png)
+
+The effects page, which the FX key opens in place of the editor: modulation, delay and reverb in a chain after the instrument.
+
+![The effects page of MTRX-1K: ensemble, ping-pong delay synced to the tempo, shimmer reverb](docs/images/effects.png)
+
 ## What it does
 
 - Runs the original firmware (version 1.20) on an emulated 6809 board: timers, UART, sample and hold DAC, latches. The firmware calibrates the voices itself on the first start, and the factory banks are read out of the patch EPROM; a panel shows the progress of both. The results are kept, so later starts are immediate.
