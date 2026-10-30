@@ -41,6 +41,16 @@ namespace matrixLib
 		// not: the step that covers it is not joined either, see glide.
 		void expectNote(bool _portaDco1, bool _portaDco2, int _interval);
 
+		// One voice heard instead of six, for a monophonic instrument played by the firmware
+		// in unison. The firmware gives a note to its voices one after another, some 4 ms
+		// apart, so the voice heard is the one that takes each note first: the first whose
+		// DCO 1 steps to the interval expectNote was told, or whose amplifier rises (the
+		// only sign when the key is the same again, or the first). Changing voice fades over
+		// 2 ms. Off: all six, as the instrument plays them.
+		void setSolo(bool _solo);
+		bool isSolo() const { return m_solo; }
+		uint32_t getSoloVoice() const { return m_soloVoice; }
+
 		// the noise source starts from this, so that two machines do not play the same noise
 		void setNoiseSeed(uint32_t _seed) { m_noiseState = _seed ? _seed : 0x12345678u; }
 
@@ -104,6 +114,14 @@ namespace matrixLib
 		std::array<bool, 2> m_notePorta{};        // per oscillator: it has portamento
 		float m_noteInterval = 0.0f;              // cents the expected note moves the pitch, 0 when not known
 		uint32_t m_noteSerial = 0;
+
+		bool m_solo = false;
+		uint32_t m_soloVoice = 0;
+		uint32_t m_soloSerial = 0;                                // the expected note whose first voice is known
+		std::array<float, Hardware::VoiceCount> m_soloMix{};      // share of each voice in the output, 0 to 1
+		std::array<float, Hardware::VoiceCount> m_soloLow{};      // lowest amplifier voltage since the note on
+		float m_soloStep = 0.0f;                                  // per sample change of a share while fading
+
 		uint32_t m_noiseState = 0x12345678;
 		std::array<float, Hardware::VoiceCount> m_rampPeak{};
 	};

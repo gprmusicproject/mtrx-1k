@@ -87,7 +87,10 @@ namespace matrixLib
 		}
 
 		constexpr uint8_t KeyboardModeParam = 48;
+		constexpr int8_t KeyboardReassign = 0;
 		constexpr int8_t KeyboardUnison = 2;
+		// notes an instrument holds when each takes two voices
+		constexpr size_t PairedNotes = Device::VoicesPerMachine / 2;
 		constexpr size_t MaxHeldNotes = 256;
 
 		// continuous messages that only need their latest value per block
@@ -916,8 +919,7 @@ namespace matrixLib
 		}
 
 		uint32_t pick = 0;
-		const bool unison = m_paramsKnown && m_paramValue[KeyboardModeParam] == KeyboardUnison;
-		if(!unison)
+		if(!firmwareUnison())
 		{
 			size_t fewest = ~size_t(0);
 			for(uint32_t m = 0; m < machineCount(); ++m)
@@ -930,6 +932,17 @@ namespace matrixLib
 					fewest = count;
 					pick = m;
 				}
+			}
+			// Two voices a note: an instrument holds three. When all of them do, the oldest
+			// note is let go to make room, or the firmware, which does not rob, drops the new one.
+			if(m_keyMode == KeyMode::PairedUnison && fewest >= PairedNotes && !m_held.empty())
+			{
+				const auto oldest = m_held.front();
+				m_held.erase(m_held.begin());
+				const uint8_t off[3] = {static_cast<uint8_t>(0x80 | oldest.channel), oldest.note, 0};
+				emit(oldest.machine, off, 3);
+				emit(oldest.machine, off, 3);
+				pick = oldest.machine;
 			}
 		}
 
@@ -972,6 +985,51 @@ namespace matrixLib
 	void Device::forgetNotes(const uint8_t _channel)
 	{
 		m_held.erase(std::remove_if(m_held.begin(), m_held.end(), [_channel](const HeldNote& _h) { return _h.channel == _channel; }), m_held.end());
+	}
+
+	bool Device::isMonoWith(const int _setting) const
+	{
+		return _setting == MonoAsPatch ? m_patchKeyboard.load() == KeyboardUnison : _setting != 0;
+	}
+
+	Device::KeyMode Device::keyModeFor(const int _patchKeyboard) const
+	{
+		const bool unison = _patchKeyboard == KeyboardUnison;
+		const int setting = m_monoSetting.load();
+		const bool mono = setting == MonoAsPatch ? unison : setting != 0;
+		if(unison)
+			return mono ? KeyMode::Unison : KeyMode::PairedUnison;
+		return mono && _patchKeyboard >= 0 ? KeyMode::Mono : KeyMode::Poly;
+	}
+
+	int Device::firmwareKeyboard(const KeyMode _mode, const int _patchKeyboard)
+	{
+		switch(_mode)
+		{
+		case KeyMode::PairedUnison: return KeyboardReassign;
+		case KeyMode::Mono:         return KeyboardUnison;
+		default:                    return _patchKeyboard;
+		}
+	}
+
+	void Device::setKeyMode(const KeyMode _mode)
+	{
+		m_keyMode = _mode;
+		m_machine.setSolo(_mode == KeyMode::Mono);
+	}
+
+	// the notes that sound end: played another way they would hang, or sound twice
+	void Device::releaseHeld()
+	{
+		const int copies = m_keyMode == KeyMode::PairedUnison ? 2 : 1;
+		for(const auto& h : m_held)
+		{
+			const uint8_t off[3] = {static_cast<uint8_t>(0x80 | h.channel), h.note, 0};
+			for(int i = 0; i < copies; ++i)
+				emit(h.machine, off, 3);
+		}
+		m_held.clear();
+		m_unisonNote = -1;
 	}
 
 	// the lowest key held, which the firmware plays in unison, -1 when none is
@@ -1150,24 +1208,65 @@ namespace matrixLib
 			// when the portamento rate is 0: they crawl after each note at the slowest rate
 			// and the patch plays out of tune. Rate 1 arrives within one pitch update, so
 			// that is what the firmware gets; the patch and the editor keep their 0.
+			// The keyboard mode is kept as the patch has it too, and the firmware is given the
+			// one that plays it mono or poly (see setMono).
 			std::vector<uint8_t> replaced;
+			int patchKeyboard = -1;
 			if(matrix && _ev.sysex[3] == patch::OpParameter && _ev.sysex.size() >= 7 && _ev.sysex[4] == PortaRateParam && (_ev.sysex[5] & 0x7f) == 0)
 			{
 				replaced = patch::createParamChange(PortaRateParam, 1);
+			}
+			else if(matrix && _ev.sysex[3] == patch::OpParameter && _ev.sysex.size() >= 7 && _ev.sysex[4] == KeyboardModeParam)
+			{
+				patchKeyboard = _ev.sysex[5] & 0x7f;
+				replaced = patch::createParamChange(KeyboardModeParam, firmwareKeyboard(keyModeFor(patchKeyboard), patchKeyboard));
 			}
 			else if(matrix && (_ev.sysex[3] == patch::OpEditBuffer || _ev.sysex[3] == patch::OpSinglePatch))
 			{
 				if(auto data = patch::decode(_ev.sysex))
 				{
+					bool changed = false;
 					auto& rate = (*data)[patch::findParam(PortaRateParam)->byte];
 					if(rate == 0)
 					{
 						rate = 1;
-						replaced = patch::encode(*data, _ev.sysex[3], _ev.sysex[4]);
+						changed = true;
 					}
+					if(_ev.sysex[3] == patch::OpEditBuffer)
+					{
+						auto& keyboard = (*data)[patch::findParam(KeyboardModeParam)->byte];
+						patchKeyboard = keyboard;
+						const int played = firmwareKeyboard(keyModeFor(patchKeyboard), patchKeyboard);
+						if(played != keyboard)
+						{
+							keyboard = static_cast<uint8_t>(played);
+							changed = true;
+						}
+					}
+					if(changed)
+						replaced = patch::encode(*data, _ev.sysex[3], _ev.sysex[4]);
 				}
 			}
 			const auto& sx = replaced.empty() ? _ev.sysex : replaced;
+
+			// Another way of playing the notes. A new patch cuts the notes that sound in the
+			// firmware; an edit of the keyboard mode does not, so they are let go first.
+			if(patchKeyboard >= 0)
+			{
+				m_patchKeyboard.store(patchKeyboard);
+				const auto mode = keyModeFor(patchKeyboard);
+				if(sx[3] == patch::OpEditBuffer)
+				{
+					m_held.clear();
+					m_unisonNote = -1;
+					setKeyMode(mode);
+				}
+				else if(mode != m_keyMode)
+				{
+					releaseHeld();
+					setKeyMode(mode);
+				}
+			}
 
 			if(matrix && (sx[3] == patch::OpParameter || sx[3] == patch::OpMatrixParameter))
 			{
@@ -1263,7 +1362,7 @@ namespace matrixLib
 		{
 			const bool on = type == 0x90 && bytes[2];
 			int interval = 0;
-			if(m_paramValue[KeyboardModeParam] == KeyboardUnison)
+			if(firmwareUnison())
 			{
 				const int lowest = unisonNote();
 				if(lowest >= 0 && m_unisonNote >= 0)
@@ -1280,6 +1379,10 @@ namespace matrixLib
 		}
 
 		emit(target, bytes, length);
+		// two voices a note: the firmware gives a key struck twice a second voice, and lets
+		// one go at each note off
+		if(m_keyMode == KeyMode::PairedUnison && (type == 0x90 || type == 0x80))
+			emit(target, bytes, length);
 	}
 
 	void Device::processAudio(const synthLib::TAudioInputs&, const synthLib::TAudioOutputs& _outputs, const size_t _samples)
@@ -1300,8 +1403,9 @@ namespace matrixLib
 			}
 		}
 
-		// the spread glides to a new value, so that a knob turned does not step
-		const float spreadTarget = m_spread.load();
+		// the spread glides to a new value, so that a knob turned does not step; one voice
+		// heard stays in the middle
+		const float spreadTarget = m_keyMode == KeyMode::Mono ? 0.0f : m_spread.load();
 		const float glide = std::min(1.0f, static_cast<float>(_samples) / (0.03f * m_machine.getSamplerate()));
 		m_spreadNow += (spreadTarget - m_spreadNow) * glide;
 		if(std::fabs(spreadTarget - m_spreadNow) < 0.002f)
@@ -1341,8 +1445,23 @@ namespace matrixLib
 		}
 		if(stereo)
 			spreadGains(m_spreadNow, count);
-		// a new detune goes to every instrument before the events of the block
-		const int detune = m_detune.load();
+		// Mono or poly changed: the notes that sound are let go and the firmware gets the
+		// keyboard mode that plays the patch now
+		if(m_paramsKnown)
+		{
+			const int patchKeyboard = m_patchKeyboard.load();
+			const auto mode = keyModeFor(patchKeyboard);
+			if(mode != m_keyMode && patchKeyboard >= 0)
+			{
+				m_emitOffset = 0;
+				releaseHeld();
+				setKeyMode(mode);
+				queueEdit(patch::createParamChange(KeyboardModeParam, firmwareKeyboard(mode, patchKeyboard)));
+			}
+		}
+		// a new detune goes to every instrument before the events of the block; one voice
+		// heard plays on the note
+		const int detune = m_keyMode == KeyMode::Mono ? 0 : m_detune.load();
 		if(detune != m_detuneSent)
 		{
 			m_detuneSent = detune;

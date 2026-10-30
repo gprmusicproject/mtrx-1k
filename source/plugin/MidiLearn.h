@@ -42,6 +42,8 @@ namespace retromulator
         // the detune of the voices against each other, the firmware's controller 94, a setting
         // likewise; not the detune of DCO 2, which is a patch parameter
         static constexpr int kDetuneTarget = 201;
+        // mono or poly, a setting likewise: the lower half of the control's range is poly, the upper mono
+        static constexpr int kMonoTarget = 202;
         enum BusField { BusSource = 0, BusAmount = 1, BusDestination = 2 };
         static constexpr uint16_t kMaxLimit = 16383;
 

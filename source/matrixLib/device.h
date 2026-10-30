@@ -95,6 +95,24 @@ namespace matrixLib
 		void setDetune(int _amount) { m_detune.store(std::min(MaxDetune, std::max(0, _amount))); }
 		int getDetune() const { return m_detune.load(); }
 
+		// Mono or poly, with the keyboard mode of the patch:
+		//   Unison, mono: the firmware's unison, all six voices on one note, as the instrument.
+		//   Unison, poly: every note on two voices, so three notes per instrument (6, 12 with
+		//     12 voices, 24 with 24...); the firmware plays Reassign and gets each note twice,
+		//     which gives it two voices; past three notes the oldest is let go.
+		//   Reassign, Rotate, mono: one voice, one note at a time. The firmware plays it in
+		//     unison and one voice of the six is heard, see Machine::setSolo; no detune, no
+		//     spread.
+		//   Reassign, Rotate, poly: as the instrument.
+		// MonoAsPatch is what the instrument does: mono in Unison, poly otherwise. The patch
+		// keeps its own keyboard mode; the firmware is given the one that plays it. Any thread.
+		static constexpr int MonoAsPatch = -1;
+		void setMono(int _mono) { m_monoSetting.store(_mono < 0 ? MonoAsPatch : (_mono ? 1 : 0)); }
+		int getMonoSetting() const { return m_monoSetting.load(); }
+		bool isMono() const { return isMonoWith(m_monoSetting.load()); }
+		// whether a setting plays mono with the keyboard mode of the patch that plays
+		bool isMonoWith(int _setting) const;
+
 	protected:
 		void readMidiOut(std::vector<synthLib::SMidiEvent>& _midiOut) override;
 		void processAudio(const synthLib::TAudioInputs& _inputs, const synthLib::TAudioOutputs& _outputs, size_t _samples) override;
@@ -210,6 +228,17 @@ namespace matrixLib
 		uint64_t m_noteCount = 0;
 		int m_unisonNote = -1;   // the note the voices play in unison, -1 when not known
 		int unisonNote() const;
+
+		// how the notes are played, see setMono
+		enum class KeyMode : uint8_t { Poly, PairedUnison, Unison, Mono };
+		KeyMode keyModeFor(int _patchKeyboard) const;
+		static int firmwareKeyboard(KeyMode _mode, int _patchKeyboard);
+		bool firmwareUnison() const { return m_keyMode == KeyMode::Unison || m_keyMode == KeyMode::Mono; }
+		void setKeyMode(KeyMode _mode);
+		void releaseHeld();
+		std::atomic<int> m_monoSetting{MonoAsPatch};
+		std::atomic<int> m_patchKeyboard{-1};   // the keyboard mode of the patch, -1 before one is known
+		KeyMode m_keyMode = KeyMode::Poly;      // audio thread
 		uint16_t m_pedalDown = 0;   // one bit per channel
 
 		Machine m_machine;

@@ -357,6 +357,11 @@ namespace retromulator
         int  getMatrixDetune() const { return m_matrixDetune.load(); }
         void setMatrixDetune(int amount);
         void setMatrixDetuneFromController(int value, int max);
+        // Mono or poly, see matrixLib::Device::setMono: -1 as the instrument (mono in Unison,
+        // poly otherwise), 0 poly, 1 mono. Kept like the spread. isMatrixMono is what plays.
+        int  getMatrixMonoSetting() const { return m_matrixMono.load(); }
+        void setMatrixMono(int mono);
+        bool isMatrixMono() const;
 
         // ── Matrix patch editing ───────────────────────────────────────────
         static constexpr int kMatrixRamSlots  = 200;   // patches 000 to 199 of the instrument
@@ -631,17 +636,19 @@ namespace retromulator
         void applyMatrixVoices();
         std::atomic<int>     m_matrixSpread{0};
         std::atomic<int>     m_matrixDetune{0};
+        std::atomic<int>     m_matrixMono{-1};
 
-        // Voices, spread and detune kept with a patch: a message of our own right after the
-        // patch in the bank file. One entry per program of the loaded bank. A patch without
+        // Voices, spread, detune and mono kept with a patch: a message of our own right after
+        // the patch in the bank file. One entry per program of the loaded bank. A patch without
         // them, the factory patches among them, has those of the instrument: 6 voices, no
-        // spread, no detune.
+        // spread, no detune, mono as its keyboard mode says.
         struct MatrixPatchExtras
         {
             bool present = false;
             int  voices = 6;
             int  spread = 0;
             int  detune = 0;
+            int  mono = -1;
         };
         std::vector<MatrixPatchExtras> m_matrixExtras;
         MatrixPatchExtras matrixExtrasOf(int index) const;
@@ -649,6 +656,7 @@ namespace retromulator
         int  m_matrixRefVoices = 6;
         int  m_matrixRefSpread = 0;
         int  m_matrixRefDetune = 0;
+        int  m_matrixRefMono = -1;
         void collectMatrixExtras(const synthLib::SysexBufferList& messages);
         void applyMatrixPatchExtras(int index);
         void takeMatrixExtrasReference(int index);

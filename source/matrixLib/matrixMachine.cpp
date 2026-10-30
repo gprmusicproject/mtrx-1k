@@ -30,6 +30,8 @@ namespace matrixLib
 		constexpr float CountStays = 0.00025f;      // seconds before a new timer count is believed
 		constexpr float NoteArrives = 0.04f;        // seconds from a note on to the pitch the firmware writes for it
 		constexpr float NoteStepTolerance = 0.35f;  // share of the interval by which the step of a note may miss it
+		constexpr float SoloFade = 0.002f;          // seconds the heard voice takes to hand over to another
+		constexpr float SoloRise = 0.1f;            // volts the amplifier of a voice rises by when it starts a note
 		constexpr float HeightLag = 0.006f;         // seconds, each of the two stages that follow the ramp height
 		constexpr float RangeSettles = 0.012f;      // seconds the waveshape voltage needs after a change of range
 	}
@@ -46,6 +48,7 @@ namespace matrixLib
 		m_dcCoeff = 1.0f - 2.0f * 3.14159265f * 5.0f / _rate;
 		m_cvK = 1.0f - std::exp(-1.0f / (Hardware::CvTimeConstant * _rate));
 		m_heightK = 1.0f - std::exp(-1.0f / (HeightLag * _rate));
+		m_soloStep = 1.0f / (SoloFade * _rate);
 		m_hw.setCvJoin(static_cast<uint32_t>(GlideShortest * _rate), static_cast<uint32_t>(GlideLongest * _rate));
 		for(auto& v : m_voices)
 			v.setSamplerate(_rate * Oversampling);
@@ -72,6 +75,18 @@ namespace matrixLib
 		m_notePorta = {_portaDco1, _portaDco2};
 		m_noteInterval = static_cast<float>(_interval);
 		++m_noteSerial;
+		for(uint32_t v = 0; v < Hardware::VoiceCount; ++v)
+			m_soloLow[v] = m_hw.getCvVolts(Hardware::voiceCv(v, Hardware::CvLin));
+	}
+
+	void Machine::setSolo(const bool _solo)
+	{
+		if(_solo == m_solo)
+			return;
+		m_solo = _solo;
+		for(uint32_t v = 0; v < Hardware::VoiceCount; ++v)
+			m_soloMix[v] = !_solo || v == m_soloVoice ? 1.0f : 0.0f;
+		m_soloSerial = m_noteSerial;
 	}
 
 	float Machine::noise()
@@ -266,11 +281,33 @@ namespace matrixLib
 			const float n0 = noise();
 			const float n1 = noise();
 			float sum0 = 0.0f, sum1 = 0.0f, right0 = 0.0f, right1 = 0.0f;
+			// the calibration hears every voice, as it always has
+			const bool solo = m_solo && !isCalibrating();
+			const bool findSolo = solo && m_soloSerial != m_noteSerial && m_noteWindow[0] != 0;
 			for(uint32_t v = 0; v < Hardware::VoiceCount; ++v)
 			{
 				buildControls(v, c);
-				const float a = m_voices[v].process(c, n0);
-				const float b = m_voices[v].process(c, n1);
+				if(findSolo && m_soloSerial != m_noteSerial)
+				{
+					const float lin = m_hw.getCvVolts(Hardware::voiceCv(v, Hardware::CvLin));
+					m_soloLow[v] = std::min(m_soloLow[v], lin);
+					const bool stepped = m_glides[v][0].noteSerial == m_noteSerial;
+					const bool rose = lin > m_soloLow[v] + SoloRise;
+					if(stepped || rose)
+					{
+						m_soloVoice = v;
+						m_soloSerial = m_noteSerial;
+					}
+				}
+				float a = m_voices[v].process(c, n0);
+				float b = m_voices[v].process(c, n1);
+				if(solo)
+				{
+					auto& mix = m_soloMix[v];
+					mix = v == m_soloVoice ? std::min(1.0f, mix + m_soloStep) : std::max(0.0f, mix - m_soloStep);
+					a *= mix;
+					b *= mix;
+				}
 				if(stereo)
 				{
 					sum0 += a * _gainL[v];

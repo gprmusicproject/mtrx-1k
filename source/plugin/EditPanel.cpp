@@ -677,6 +677,65 @@ namespace retromulator
             int m_shown = -1;
         };
 
+        // Mono or poly, with the keyboard mode: Unison mono is the instrument's, Unison poly
+        // gives every note two voices, Reassign or Rotate mono plays one voice. Shows what
+        // plays, which before a choice is what the instrument does with the keyboard mode.
+        class MonoChoice final : public EditPanel::Control
+        {
+        public:
+            explicit MonoChoice(EditPanel::Context& context) : Control(context)
+            {
+                setTitle("Mono / Poly");
+            }
+
+            void refresh() override
+            {
+                const int m = ctx.proc.isMatrixMono() ? 1 : 0;
+                if(m != m_shown)
+                {
+                    m_shown = m;
+                    repaint();
+                }
+            }
+
+            void learnTargets(std::vector<LearnTarget>& out) const override
+            {
+                out.push_back({MidiLearn::kMonoTarget, getLocalBounds()});
+            }
+
+            void paint(juce::Graphics& g) override
+            {
+                auto b = getLocalBounds();
+                g.setColour(juce::Colour(style().label));
+                g.setFont(sans(9.5f));
+                g.drawFittedText("Mono/Poly", b.removeFromTop(kLabelHeight), juce::Justification::centred, 1, 0.6f);
+                drawBox(g, style(), b.withTrimmedTop(2).toFloat(), ctx.proc.isMatrixMono() ? "Mono" : "Poly", false, true);
+            }
+
+            void mouseDown(const juce::MouseEvent&) override
+            {
+                showMenu(*this, {"Mono", "Poly"}, ctx.proc.isMatrixMono() ? 0 : 1, [this](const int picked)
+                {
+                    set(picked == 0);
+                });
+            }
+
+            void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
+            {
+                if(wheel.deltaY != 0.0f)
+                    set(wheel.deltaY > 0.0f);
+            }
+
+        private:
+            void set(const bool mono)
+            {
+                ctx.proc.setMatrixMono(mono ? 1 : 0);
+                refresh();
+            }
+
+            int m_shown = -1;
+        };
+
         // A knob on a setting of the instance rather than a patch parameter: Spread and
         // Detune. Saved with the instance and with a patch saved from the editor; a control of
         // the player's keyboard can be assigned to it through its MIDI learn target.
@@ -1994,8 +2053,8 @@ namespace retromulator
         }
         {
             const auto at = section("RAMP / PORTAMENTO / KEYBOARD", kRightX, rowC, kRightWidth, kLastRowHeight);
-            // six knobs and Legato in a row: the knobs of this section are narrower
-            constexpr int w = 40;
+            // six knobs, Legato and Mono/Poly in a row: the knobs of this section are narrower
+            constexpr int w = 36;
             static const std::pair<int, const char*> patchKnobs[] = {{40, "Ramp 1"}, {42, "Ramp 2"}, {44, "Porta"}, {45, "< Velocity"}};
             int kx = at.x;
             for(const auto& [native, label] : patchKnobs)
@@ -2018,7 +2077,8 @@ namespace retromulator
                     [](const int v) { return v > 0 ? juce::String(juce::CharPointer_UTF8("\xc2\xb1")) + juce::String(juce::roundToInt(v * 1.19)) + "c" : juce::String(); }}),
                 {kx, at.y, w, kKnobHeight});
             kx += w;
-            toggle(47, "Legato", kx, at.y + 10);
+            add(std::make_unique<Toggle>(ctx, 47, "Legato"), {kx, at.y + 10, 31, kChoiceHeight});
+            add(std::make_unique<MonoChoice>(ctx), {kx + 32, at.y + 10, 34, kChoiceHeight});
             // the voices next to the keyboard mode
             const int x = choices(at.translated(0, kKnobRow), {{41, "Ramp 1 Trig", 54}, {43, "Ramp 2 Trig", 54}, {46, "Porta Mode", 58}, {48, "Keyboard", 62}});
             add(std::make_unique<VoicesChoice>(ctx), {x, at.y + kKnobRow, 38, kChoiceHeight});
