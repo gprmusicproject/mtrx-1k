@@ -5,8 +5,11 @@
 ; What it does
 ;   - the standalone app and the user manual go to Program Files\GPR Music Project\MTRX-1K
 ;   - the VST3 plug-in goes to Program Files\Common Files\VST3\GPR Music Project
-;   - the data folders ROM, Patch and MIDI are made, empty, in the Documents folder of the
-;     user who started Setup. No firmware and no sounds are part of the package.
+;   - the data folders ROM, Patch and MIDI are made in the Documents folder of the user who
+;     started Setup, empty but for the bank GPR Music Project Signature in Patch, which is
+;     copied only when no file of that name is there. No firmware is part of the package.
+;     The bank is not part of the source: it goes in only when the file is in the root of
+;     the checkout as the setup is built: it comes with the compiled package only.
 ;   - MTRX-1K is listed among the installed apps of Windows and removed from there; that
 ;     entry is the only thing written to the registry
 ;   - on removal the user is asked whether MIDI profiles and sounds go too
@@ -24,6 +27,10 @@
 #define Publisher    "GPR Music Project"
 #define ManualName   "MTRX-1K User Manual.pdf"
 #define NoteName     "Put your firmware here - read me.txt"
+#define BankName     "GPR Music Project Signature.syx"
+#if FileExists(AddBackslash(SourcePath) + "..\" + BankName)
+  #define HaveBank
+#endif
 #define DataSub      "\Documents\GPR Music Project\MTRX-1K"
 
 #ifndef BuildDir
@@ -113,13 +120,22 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 Name: "it"; MessagesFile: "compiler:Languages\Italian.isl"
 
 [Messages]
+#ifdef HaveBank
+en.WelcomeLabel2=This will install [name/ver]: the standalone app with its user manual, the VST3 plug-in and GPR Music Project Signature, a bank of 41 sounds by GPR Music Project.%n%nClose your host before you go on.
+it.WelcomeLabel2=Verrà installato [name/ver]: l'applicazione standalone con il manuale utente, il plug-in VST3 e GPR Music Project Signature, un banco di 41 suoni di GPR Music Project.%n%nChiudi il tuo host prima di continuare.
+#else
 en.WelcomeLabel2=This will install [name/ver]: the standalone app with its user manual, and the VST3 plug-in.%n%nClose your host before you go on.
 it.WelcomeLabel2=Verrà installato [name/ver]: l'applicazione standalone con il manuale utente e il plug-in VST3.%n%nChiudi il tuo host prima di continuare.
+#endif
 
 [CustomMessages]
 en.ReadyApp=Standalone app and user manual
 en.ReadyVst3=VST3 plug-in
+#ifdef HaveBank
+en.ReadyData=Folders for your firmware, sounds and MIDI profiles, with the bank GPR Music Project Signature (what is there stays)
+#else
 en.ReadyData=Folders for your firmware, sounds and MIDI profiles (made empty, what is there stays)
+#endif
 en.ReadyRemove=To remove MTRX-1K: Windows Settings, Apps, Installed apps.
 en.OpenManual=Open the user manual
 en.StartApp=Start MTRX-1K
@@ -131,7 +147,11 @@ en.OldCopy=Another copy of the plug-in was found in%n%1%n%nA host must not find 
 en.RemoveData=Do you also want to remove your MIDI mappings and your own sounds?%n%nYes: the folders MIDI and Patch in%n%1%nare deleted, with your MIDI profiles, your banks and the patches you saved. This cannot be undone.%n%nNo: they are kept for a later installation.%n%nThe firmware files in the folder ROM are kept in both cases.
 it.ReadyApp=Applicazione standalone e manuale utente
 it.ReadyVst3=Plug-in VST3
+#ifdef HaveBank
+it.ReadyData=Cartelle per firmware, suoni e profili MIDI, con il banco GPR Music Project Signature (quello che c'è resta)
+#else
 it.ReadyData=Cartelle per firmware, suoni e profili MIDI (create vuote, quello che c'è resta)
+#endif
 it.ReadyRemove=Per rimuovere MTRX-1K: Impostazioni di Windows, App, App installate.
 it.OpenManual=Apri il manuale utente
 it.StartApp=Avvia MTRX-1K
@@ -147,6 +167,9 @@ Source: "{#BuildDir}\Standalone\MTRX-1K.exe"; DestDir: "{app}"; Flags: ignorever
 Source: "{#ManualPdf}"; DestDir: "{app}"; DestName: "{#ManualName}"; Flags: ignoreversion
 Source: "..\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "firmware_note.txt"; DestDir: "{app}"; DestName: "{#NoteName}"; Flags: ignoreversion
+#ifdef HaveBank
+Source: "..\{#BankName}"; DestDir: "{app}"; Flags: ignoreversion
+#endif
 Source: "{#BuildDir}\VST3\MTRX-1K.vst3\*"; DestDir: "{#Vst3Dir}\MTRX-1K.vst3"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; the picture of the plugin on the first page of the wizard
 Source: "images\plugin_100.bmp"; Flags: dontcopy
@@ -267,7 +290,7 @@ end;
 // another name lent the rights: the command runs as that user, and cmd puts in the profile.
 procedure CreateDataFolders;
 var
-  Base, Note, Command: String;
+  Base, Note, Bank, Command: String;
   ResultCode: Integer;
 begin
 #ifdef TestRoot
@@ -276,10 +299,13 @@ begin
   Base := '%USERPROFILE%{#DataSub}';
 #endif
   Note := ExpandConstant('{app}\{#NoteName}');
+  // the bank goes in once: a copy the user changed, or saved patches into, is left alone
+  Bank := ExpandConstant('{app}\{#BankName}');
   Command := '/s /c "(if not exist "' + Base + '\ROM" mkdir "' + Base + '\ROM")'
            + ' & (if not exist "' + Base + '\Patch" mkdir "' + Base + '\Patch")'
            + ' & (if not exist "' + Base + '\MIDI" mkdir "' + Base + '\MIDI")'
-           + ' & (if not exist "' + Base + '\ROM\{#NoteName}" copy /y "' + Note + '" "' + Base + '\ROM\" >nul)"';
+           + ' & (if not exist "' + Base + '\ROM\{#NoteName}" copy /y "' + Note + '" "' + Base + '\ROM\" >nul)'
+           + ' & (if not exist "' + Base + '\Patch\{#BankName}" copy /y "' + Bank + '" "' + Base + '\Patch\" >nul)"';
   ExecAsOriginalUser(ExpandConstant('{cmd}'), Command, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
@@ -303,6 +329,7 @@ end;
 
 var
   RemoveData: Boolean;
+  BankUnchanged: Boolean;
 
 function HasFiles(const Folder: String): Boolean;
 var
@@ -343,6 +370,9 @@ begin
   Data := DataDir;
   if CurUninstallStep = usUninstall then
   begin
+    // the bank goes with the app only as Setup put it; once changed it is the user's
+    BankUnchanged := FileExists(Data + '\Patch\{#BankName}') and FileExists(ExpandConstant('{app}\{#BankName}'))
+      and (GetSHA256OfFile(Data + '\Patch\{#BankName}') = GetSHA256OfFile(ExpandConstant('{app}\{#BankName}')));
     // asked after the removal itself was confirmed; a silent removal keeps the data unless told
     Tail := Uppercase(GetCmdTail);
     if Pos('/REMOVEDATA=1', Tail) > 0 then
@@ -354,6 +384,8 @@ begin
   if CurUninstallStep = usPostUninstall then
   begin
     DeleteFile(Data + '\ROM\{#NoteName}');
+    if BankUnchanged then
+      DeleteFile(Data + '\Patch\{#BankName}');
     if RemoveData then
     begin
       DelTree(Data + '\MIDI', True, True, True);

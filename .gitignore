@@ -28,3 +28,6 @@ DerivedData/
 mtrx1kv*.bin
 M1000-IC_*.BIN
 *.nvram
+
+# The Signature bank comes with the compiled package only
+/GPR Music Project Signature.syx
