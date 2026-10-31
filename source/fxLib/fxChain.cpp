@@ -15,7 +15,10 @@ namespace fxLib
 		constexpr auto T = ControlUnit::Time;
 		constexpr auto B = ControlUnit::Bipolar;
 
+		constexpr auto St = ControlUnit::Semitones;
+
 		enum ModType { ModChorus, ModFlanger, ModPhaser, ModEnsemble };
+		const char* const ChorusModes[] = {"I", "II", "I+II"};
 		const char* const EnsembleModes[] = {"Strings", "Chorus", "Both"};
 		enum DelayType { DelayMono, DelayStereo };
 		constexpr int PingPongControl = 6;   // of the stereo delay
@@ -23,7 +26,7 @@ namespace fxLib
 
 		const TypeInfo g_modulation[] =
 		{
-			{"Chorus",  3, {{{"Rate", 0.3f, K, P}, {"Depth", 0.5f, K, P}, {"Mix", 0.5f, K, P}}}},
+			{"Chorus",  2, {{{"Mode", 0.0f, K, P, 3, ChorusModes}, {"Mix", 0.5f, K, P}}}},
 			{"Flanger", 5, {{{"Rate", 0.25f, K, P}, {"Depth", 0.6f, K, P}, {"Manual", 0.3f, K, P}, {"Feedback", 0.75f, K, B}, {"Mix", 0.5f, K, P}}}},
 			{"Phaser",  4, {{{"Rate", 0.3f, K, P}, {"Depth", 0.7f, K, P}, {"Feedback", 0.5f, K, P}, {"Mix", 0.5f, K, P}}}},
 			{"Ensemble", 3, {{{"Mode", 0.0f, K, P, 3, EnsembleModes}, {"Depth", 0.6f, K, P}, {"Mix", 0.7f, K, P}}}},
@@ -39,9 +42,14 @@ namespace fxLib
 			{"Room",    4, {{{"Decay", 0.4f, K, P}, {"Tone", 0.5f, K, P}, {"Position", 0.5f, K, P}, {"Mix", 0.3f, K, P}}}},
 			{"Plate",   4, {{{"Decay", 0.5f, K, P}, {"Tone", 0.6f, K, P}, {"Predelay", 0.0f, K, P}, {"Mix", 0.25f, K, P}}}},
 			{"Spring",  3, {{{"Dwell", 0.5f, K, P}, {"Tone", 0.5f, K, P}, {"Mixer", 0.3f, K, P}}}},
-			{"Shimmer", 8, {{{"Decay", 0.6f, K, P}, {"Diffusion", 0.7f, K, P}, {"Low End", 0.5f, K, P}, {"Tone", 0.5f, K, P},
-			                 {"Mod", 0.4f, K, P}, {"Shimmer", 0.0f, K, P}, {"Predelay", 0.1f, K, P}, {"Mix", 0.35f, K, P}}}},
+			// the starting values GPR Music Project chose: decay 7.3 s, low decay 3.9 s, damping
+			// 6 kHz, A and B both +12 at half level, feedback 76, the loop cut at 250 Hz and 6 kHz
+			{"Shimmer", 11, {{{"Decay", 0.9f, K, P}, {"Low Decay", 0.42f, K, P}, {"Tone", 4.5f / 10.5f, K, P},
+			                  {"Pitch A", 36.0f / 48.0f, K, St, 49}, {"Level A", 0.5f, K, P}, {"Pitch B", 36.0f / 48.0f, K, St, 49}, {"Level B", 0.5f, K, P},
+			                  {"Feedback", 0.76f, K, P}, {"Low Cut", 200.0f / 550.0f, K, P}, {"High Cut", 0.33f, K, P}, {"Mix", 0.6f, K, P}}}},
 		};
+		// a pitch of the shimmer: -24 to +24 semitones
+		constexpr int SemitoneRange = 24;
 
 		struct Division { const char* name; double beats; };
 		const Division g_divisions[] =
@@ -57,9 +65,35 @@ namespace fxLib
 
 		// 14 bits of a value in two bytes of 7
 		uint16_t toBits(const float _v) { return static_cast<uint16_t>(std::lround(std::clamp(_v, 0.0f, 1.0f) * 16383.0f)); }
-		// 5: the ensemble came; 4: the spring of 3 had other controls; 1 and 2 were partly others' effects
-		constexpr uint8_t StateVersion = 5;
+		// 7: the shimmer of Shimmer-Reverb, with other controls; 6: the mix of the chain, the
+		// chorus with modes, the pitch and feedback of the shimmer; 5: the ensemble came; 4: the spring of 3 had other controls; 1 and 2 were partly others' effects
+		constexpr uint8_t StateVersion = 7;
+		constexpr uint8_t OldestReadable = 5;
+
+		// how many controls a type had in a version of the settings
+		int controlsIn(const int _version, const int _rack, const int _type)
+		{
+			if(_version == 5 && _rack == RackModulation && _type == ModChorus)
+				return 3;
+			if(_version == 5 && _rack == RackReverb && _type == VerbShimmer)
+				return 8;
+			return typeInfo(_rack, _type).controlCount;
+		}
+
+		// where a control of a version of the settings is now; -1 when it is gone
+		int placeNow(const int _version, const int _rack, const int _type, const int _control)
+		{
+			if(_version == 5 && _rack == RackModulation && _type == ModChorus)
+				return _control == 2 ? 1 : -1;    // rate and depth went, the mix stays
+			// of another shimmer only the mix, the last control, carries over
+			if(_version < 7 && _rack == RackReverb && _type == VerbShimmer)
+				return _control == controlsIn(_version, _rack, _type) - 1 ? typeInfo(_rack, _type).controlCount - 1 : -1;
+			return _control;
+		}
 	}
+
+	// semitones of a value 0-1
+	int semitonesOf(const float _value) { return static_cast<int>(std::lround(_value * 2.0f * SemitoneRange)) - SemitoneRange; }
 
 	const char* rackName(const int _rack)
 	{
@@ -116,7 +150,7 @@ namespace fxLib
 		m_engines[RackReverb][VerbRoom] = createRoom();
 		m_engines[RackReverb][VerbPlate] = createPlate();
 		m_engines[RackReverb][VerbSpring] = createSpring();
-		m_engines[RackReverb][VerbShimmer] = createCloud();
+		m_engines[RackReverb][VerbShimmer] = createShimmer();
 		for(auto& r : m_racks)
 			r = std::make_unique<RackState>();
 		reset();
@@ -127,6 +161,7 @@ namespace fxLib
 	void Chain::reset()
 	{
 		m_chainOn.store(false);
+		m_mix.store(1.0f);
 		for(int r = 0; r < RackCount; ++r)
 		{
 			m_rackOn[r].store(false);
@@ -147,9 +182,11 @@ namespace fxLib
 		const bool newRate = _sampleRate != m_rate.load();
 		m_rate.store(_sampleRate);
 		m_maxBlock = std::max(_maxBlock, 64);
-		for(auto* b : {&m_wetL, &m_wetR, &m_dryL, &m_dryR, &m_inL, &m_inR})
+		for(auto* b : {&m_wetL, &m_wetR, &m_dryL, &m_dryR, &m_inL, &m_inR, &m_srcL, &m_srcR})
 			b->assign(static_cast<size_t>(m_maxBlock), 0.0f);
 		m_fadeStep = 1.0f / (FadeSeconds * static_cast<float>(_sampleRate));
+		m_mixGlide = static_cast<float>(1.0 - std::exp(-1.0 / (0.03 * _sampleRate)));
+		m_mixNow = m_mix.load();
 
 		// buffers for this rate, nothing playing
 		if(newRate)
@@ -211,6 +248,12 @@ namespace fxLib
 			return v >= 0.5f ? "On" : "Off";
 		if(c.steps > 1 && c.labels)
 			return c.labels[std::clamp(static_cast<int>(std::lround(v * (c.steps - 1))), 0, c.steps - 1)];
+		if(c.unit == ControlUnit::Semitones)
+		{
+			const int n = semitonesOf(v);
+			std::snprintf(text, sizeof(text), n ? "%+d st" : "%d st", n);
+			return text;
+		}
 		if(c.unit == ControlUnit::Time)
 		{
 			if(getValue(_rack, _type, delaySyncControl(_type)) >= 0.5f)
@@ -281,6 +324,15 @@ namespace fxLib
 			return;
 		}
 
+		// the instrument's own sound, for the mix of the chain at the end
+		const float mix = m_mix.load();
+		const bool mixing = mix < 1.0f || m_mixNow < 1.0f;
+		if(mixing)
+		{
+			std::copy(_left, _left + _samples, m_srcL.data());
+			std::copy(_right, _right + _samples, m_srcR.data());
+		}
+
 		const bool chainOn = m_chainOn.load();
 		for(int r = 0; r < RackCount; ++r)
 		{
@@ -322,14 +374,31 @@ namespace fxLib
 			}
 			state.gain = g;
 		}
+
+		if(mixing)
+		{
+			float m = m_mixNow;
+			for(int i = 0; i < _samples; ++i)
+			{
+				m += m_mixGlide * (mix - m);
+				_left[i] = m_srcL[i] + m * (_left[i] - m_srcL[i]);
+				_right[i] = m_srcR[i] + m * (_right[i] - m_srcR[i]);
+			}
+			// close enough is there, so that a full mix costs nothing again
+			m_mixNow = std::fabs(mix - m) < 1.0e-4f ? mix : m;
+		}
 	}
 
-	// version, chain, then per rack: on, type, and every control of every type in 14 bits
+	// version, chain on, its mix in 14 bits, then per rack: on, type, and every control of
+	// every type in 14 bits. Version 5 had no mix.
 	std::vector<uint8_t> Chain::write() const
 	{
 		std::vector<uint8_t> d;
 		d.push_back(StateVersion);
 		d.push_back(m_chainOn.load() ? 1 : 0);
+		const auto mixBits = toBits(m_mix.load());
+		d.push_back(static_cast<uint8_t>(mixBits >> 7));
+		d.push_back(static_cast<uint8_t>(mixBits & 0x7f));
 		for(int r = 0; r < RackCount; ++r)
 		{
 			d.push_back(m_rackOn[r].load() ? 1 : 0);
@@ -349,32 +418,44 @@ namespace fxLib
 
 	bool Chain::read(const uint8_t* _data, const size_t _size)
 	{
-		size_t expected = 2;
+		if(_size < 1 || _data[0] < OldestReadable || _data[0] > StateVersion)
+			return false;
+		const int version = _data[0];
+		const bool hasMix = version >= 6;
+		size_t expected = hasMix ? 4 : 2;
 		for(int r = 0; r < RackCount; ++r)
 		{
 			expected += 2;
 			for(int t = 0; t < typeCount(r); ++t)
-				expected += 2 * static_cast<size_t>(typeInfo(r, t).controlCount);
+				expected += 2 * static_cast<size_t>(controlsIn(version, r, t));
 		}
-		if(_size != expected || _data[0] != StateVersion)
+		if(_size != expected)
 			return false;
 		for(size_t i = 0; i < _size; ++i)
 			if(_data[i] > 0x7f)
 				return false;
 
+		// what the settings do not hold starts where it starts
+		reset();
 		size_t p = 1;
 		m_chainOn.store(_data[p++] != 0);
+		if(hasMix)
+		{
+			m_mix.store(static_cast<float>((_data[p] << 7) | _data[p + 1]) / 16383.0f);
+			p += 2;
+		}
 		for(int r = 0; r < RackCount; ++r)
 		{
 			m_rackOn[r].store(_data[p++] != 0);
 			m_type[r].store(std::min<int>(_data[p++], typeCount(r) - 1));
 			for(int t = 0; t < typeCount(r); ++t)
 			{
-				for(int c = 0; c < typeInfo(r, t).controlCount; ++c)
+				for(int c = 0; c < controlsIn(version, r, t); ++c)
 				{
 					const int bits = (_data[p] << 7) | _data[p + 1];
 					p += 2;
-					m_values[r][t][c].store(static_cast<float>(bits) / 16383.0f);
+					if(const int now = placeNow(version, r, t, c); now >= 0)
+						m_values[r][t][now].store(static_cast<float>(bits) / 16383.0f);
 				}
 			}
 		}

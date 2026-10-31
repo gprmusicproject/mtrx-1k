@@ -4614,6 +4614,16 @@ namespace retromulator
             const auto* dev = getMatrixDevice();
             m_fx->process(buffer.getWritePointer(0), buffer.getWritePointer(1), buffer.getNumSamples(), dev ? dev->getHostBpm() : 120.0);
         }
+
+        if(appliesOutputGainItself())
+        {
+            const float target = getOutputGain();
+            const float from = m_outputGainNow < 0.0f ? target : m_outputGainNow;
+            m_outputGainNow = target;
+            if(from != 1.0f || target != 1.0f)
+                for(int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                    buffer.applyGainRamp(ch, 0, buffer.getNumSamples(), from, target);
+        }
     }
 
     // ── Effects ─────────────────────────────────────────────────────────────────
@@ -4636,11 +4646,15 @@ namespace retromulator
             m_fx->setChainOn(on);
             return;
         }
-        const int i = target - MidiLearn::kFxTargetFirst;
-        const int rack = i / MidiLearn::kFxTargetsPerRack, control = i % MidiLearn::kFxTargetsPerRack;
-        if(i < 0 || rack >= fxLib::RackCount)
+        if(target == MidiLearn::kFxChainMixTarget)
+        {
+            m_fx->setMix(static_cast<float>(juce::jlimit(0, max, value)) / static_cast<float>(max));
             return;
-        if(control == MidiLearn::kFxRackOnControl)
+        }
+        int rack = 0, control = 0;
+        if(!MidiLearn::fxRackControlOf(target, rack, control) || rack >= fxLib::RackCount)
+            return;
+        if(control < 0)
         {
             m_fx->setRackOn(rack, on);
             return;

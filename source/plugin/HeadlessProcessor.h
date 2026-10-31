@@ -647,6 +647,10 @@ namespace retromulator
         std::atomic<int>     m_matrixDetune{0};
         std::atomic<int>     m_matrixMono{-1};
         std::unique_ptr<fxLib::Chain> m_fx;
+        // The volume comes after the effects, so that it turns their echoes and tails down
+        // too; a change glides over one block.
+        bool appliesOutputGainItself() const override { return m_synthType == SynthType::Matrix && m_fx; }
+        float m_outputGainNow = -1.0f;
 
         // Voices, spread, detune and mono kept with a patch: a message of our own right after
         // the patch in the bank file. One entry per program of the loaded bank. A patch without

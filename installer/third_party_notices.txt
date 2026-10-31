@@ -1,0 +1,71 @@
+MTRX-1K - third-party notices
+
+MTRX-1K is free software under the GNU General Public License v3 (LICENSE.txt). Besides
+Retromulator and Gearmulator (see the user manual), its effects contain code from these
+projects.
+
+
+The chorus
+----------
+Ported from KR106Chorus.h and BBDFilter.h of Ultramaster KR-106 by kayrockscreenprinting,
+https://github.com/kayrockscreenprinting/ultramaster_kr106, GNU General Public License v3.
+
+
+The shimmer reverb
+------------------
+After Shimmer-Reverb by Danial Kooshki, https://github.com/Danial-k-f/Shimmer-Reverb
+
+MIT License
+
+Copyright (c) 2025 Danial Kooshki
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+The reverberator of the shimmer
+-------------------------------
+zita_rev1 of the Faust libraries (demos.lib, reverbs.lib, filters.lib), after zita-rev1 by
+Fons Adriaensen, generated with Faust (https://faust.grame.fr).
+Author: Julius O. Smith III, Christopher Arndt.
+Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+Licence: STK-4.3 license (MIT-style); zita_rev1 in demos.lib: MIT.
+
+The STK-4.3 license:
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+Any person wishing to distribute modifications to the Software is asked to send
+the modifications to the original developer so that they can be incorporated
+into the canonical version. This is, however, not a binding provision of this
+license.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

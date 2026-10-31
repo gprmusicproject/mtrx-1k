@@ -98,6 +98,9 @@ namespace pluginLib
 			applyGain(_buffers, _numSamples, getOutputGain());
 		}
 
+		// true when a processor applies the output gain itself, after what it adds to the sound
+		virtual bool appliesOutputGainItself() const { return false; }
+
 		template<size_t N> static void applyGain(std::array<float*, N>& _buffers, const size_t _numSamples, const float _gain)
 		{
 			if(_gain == 1.0f)

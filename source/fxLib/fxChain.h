@@ -12,19 +12,20 @@ namespace fxLib
 	class OwnEffect;
 
 	// The effects that follow the instrument: three racks in a row, modulation, delay and
-	// reverb, each playing one type at a time, and a switch for the whole chain. Every effect
-	// is MTRX-1K's own, see fxOwn.h.
+	// reverb, each playing one type at a time, a switch for the whole chain and its mix with
+	// the instrument's own sound. The effects are in fxOwn.h.
 	//
 	// Settings are written from any thread and read by the audio thread at the start of a
 	// block. Switching a rack, the chain or a type fades over 10 ms, so nothing clicks; an
 	// effect that comes back starts from silence, not from what it held when it stopped.
 	enum Rack : int { RackModulation, RackDelay, RackReverb, RackCount };
 
-	constexpr int MaxControls = 8;
+	constexpr int MaxControls = 11;
 	constexpr int MaxTypes = 5;
 
 	enum class ControlKind : uint8_t { Knob, Switch };
-	enum class ControlUnit : uint8_t { Percent, Time, Bipolar };
+	// Semitones: a knob that clicks over its steps around a centre of 0
+	enum class ControlUnit : uint8_t { Percent, Time, Bipolar, Semitones };
 
 	struct ControlInfo
 	{
@@ -54,6 +55,8 @@ namespace fxLib
 	const char* delayDivisionName(int _division);
 	double delayDivisionBeats(int _division);
 	int delayDivisionOf(float _value);
+	// what a Semitones control says: -24 to +24 semitones
+	int semitonesOf(float _value);
 
 	class Chain
 	{
@@ -72,6 +75,9 @@ namespace fxLib
 		// settings, any thread
 		void setChainOn(bool _on) { m_chainOn.store(_on); }
 		bool isChainOn() const { return m_chainOn.load(); }
+		// the share of the chain's output against the instrument's own sound, 0-1
+		void setMix(float _mix) { m_mix.store(_mix < 0.0f ? 0.0f : _mix > 1.0f ? 1.0f : _mix); }
+		float getMix() const { return m_mix.load(); }
 		void setRackOn(int _rack, bool _on) { m_rackOn[_rack].store(_on); }
 		bool isRackOn(int _rack) const { return m_rackOn[_rack].load(); }
 		void setType(int _rack, int _type);
@@ -93,7 +99,8 @@ namespace fxLib
 		void reset();
 
 		// The settings as bytes 0-127, so that they fit a SysEx message; read returns false
-		// and changes nothing when the bytes are not settings.
+		// and changes nothing when the bytes are not settings. Settings of versions 5 (1.0.0
+		// alpha) and 6 are read too: what they lack takes its starting value.
 		std::vector<uint8_t> write() const;
 		bool read(const uint8_t* _data, size_t _size);
 		bool read(const std::vector<uint8_t>& _data) { return read(_data.data(), _data.size()); }
@@ -110,6 +117,9 @@ namespace fxLib
 		double delaySeconds(int _type, int _control, double _bpm) const;
 
 		std::atomic<bool> m_chainOn{false};
+		std::atomic<float> m_mix{1.0f};
+		float m_mixNow = 1.0f;     // the mix as it glides to the one set
+		float m_mixGlide = 0.001f;
 		std::array<std::atomic<bool>, RackCount> m_rackOn{};
 		std::array<std::atomic<int>, RackCount> m_type{};
 		std::array<std::array<std::array<std::atomic<float>, MaxControls>, MaxTypes>, RackCount> m_values;
@@ -119,7 +129,7 @@ namespace fxLib
 
 		std::atomic<double> m_rate{0.0};
 		int m_maxBlock = 0;
-		std::vector<float> m_wetL, m_wetR, m_dryL, m_dryR, m_inL, m_inR;
+		std::vector<float> m_wetL, m_wetR, m_dryL, m_dryR, m_inL, m_inR, m_srcL, m_srcR;
 		float m_fadeStep = 0.0f;
 	};
 }

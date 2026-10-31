@@ -1,4 +1,6 @@
 #include "fxOwn.h"
+#include "fxChain.h"
+#include "fxZitaRev.h"
 
 #include <algorithm>
 #include <array>
@@ -67,77 +69,224 @@ namespace fxLib
 
 		// ── Modulation ──────────────────────────────────────────────────────────
 
-		// The chorus of a Boss CE-2: one bucket-brigade line, 2 to 12 ms, swept by a rounded
-		// triangle, its input and output darkened by the filters the line needs, mixed with
-		// the dry sound at equal level (Mix in the middle). The pedal is mono; here the right
-		// side sweeps the other way, which spreads the chorus.
-		// Controls: rate, depth, mix.
+		// The chorus of a classic polysynth: two bucket-brigade lines swept in antiphase by one
+		// LFO around 3.3 ms, each between the matched filters of the chip and with its soft
+		// saturation, its gain following the clock as the charge transfer does. Ported from
+		// KR106Chorus.h and BBDFilter.h of Ultramaster KR-106 by kayrockscreenprinting
+		// (github.com/kayrockscreenprinting/ultramaster_kr106, GPL v3), whose rates, depths and
+		// gains were measured on the hardware. Left out are its noise floor, the leakage noise,
+		// the clicks of the clock and the mains ripple. The instrument is mono in and stereo
+		// out; here each side takes its own line, so the spread of the voices stays.
+		// Mode I as the instrument; II as the instrument but deeper, so that it stands apart from
+		// I; I+II, unlike the instrument (whose fast vibrato is left out), plays I and II at once
+		// on a second pair of lines, two choruses together. Mix in the middle is the instrument's own
+		// balance of dry and wet, to the left the chorus fades, to the right the dry sound.
+		// Controls: mode, mix.
 		class Chorus final : public OwnEffect
 		{
 		public:
 			void prepare(const double _rate) override
 			{
-				m_rate = _rate;
+				m_rate = static_cast<float>(_rate);
 				for(auto& l : m_lines)
-					l.resize(static_cast<size_t>(_rate * 0.02) + 8);
-				// two poles each side of the line, as the filters around a BBD
-				m_filterK = onePole(7500.0, _rate);
+					l.prepare(m_rate);
+				m_fadeStep = 1.0f / (FadeMs * 0.001f * m_rate);
 				m_smoothK = static_cast<float>(1.0 - std::exp(-1.0 / (0.03 * _rate)));
 				clear();
 			}
 
 			void clear() override
 			{
-				for(auto& l : m_lines) l.clear();
-				for(auto& f : m_filters) f.fill(0.0f);
-				m_phase = 0.0;
-				m_depth = -1.0f;
+				for(auto& l : m_lines)
+					l.clear();
+				m_phase = {0.0f, 0.0f};
+				m_mode = -1;
+				m_fade = 0.0f;
+				m_hold = 0;
+				m_mix = -1.0f;
 				played = false;
 			}
 
 			void process(const float* _inL, const float* _inR, float* _outL, float* _outR, const int _samples, const float* _v, double, double) override
 			{
-				const double step = 0.15 * std::pow(50.0, static_cast<double>(_v[0])) / m_rate;   // 0.15 to 7.5 Hz, cycles a sample
-				const float mix = _v[2];
-				if(m_depth < 0.0f)
-					m_depth = _v[1];
-				const double perMs = m_rate / 1000.0;
+				const int want = std::clamp(static_cast<int>(std::lround(_v[0] * 2.0f)), 0, 2);
+				if(m_mode < 0)
+					setMode(want);
+				if(m_mix < 0.0f)
+					m_mix = _v[1];
+
 				for(int i = 0; i < _samples; ++i)
 				{
-					m_depth += m_smoothK * (_v[1] - m_depth);
-					// a triangle with its corners rounded, as the pedal's LFO comes out
-					double tri = 4.0 * std::fabs(m_phase - 0.5) - 1.0;
-					tri *= 1.5 - 0.5 * tri * tri;
-					m_phase += step;
-					if(m_phase >= 1.0)
-						m_phase -= 1.0;
+					// another mode: the chorus fades out, changes and comes back
+					const float target = want == m_mode && m_hold == 0 ? 1.0f : 0.0f;
+					if(m_hold > 0)
+						--m_hold;
+					m_fade = target > m_fade ? std::min(target, m_fade + m_fadeStep) : std::max(target, m_fade - m_fadeStep);
+					if(m_fade <= 0.0f && want != m_mode)
+						setMode(want);
+					for(int p = 0; p < 2; ++p)
+						m_depth[p] += (m_depthTarget[p] - m_depth[p]) * m_fadeStep;
+					m_mix += m_smoothK * (_v[1] - m_mix);
 
+					// per pair one LFO, its lines in antiphase, each a little off as two chips are
 					const float in[2] = {_inL[i], _inR[i]};
-					float out[2];
-					for(int ch = 0; ch < 2; ++ch)
+					float wet[2] = {0.0f, 0.0f};
+					for(int p = 0; p < m_pairs; ++p)
 					{
-						auto& f = m_filters[ch];
-						f[0] += m_filterK * (in[ch] - f[0]);
-						f[1] += m_filterK * (f[0] - f[1]);
-						m_lines[ch].write(f[1]);
-						const double ms = 7.0 + 5.0 * m_depth * (ch ? -tri : tri);
-						f[2] += m_filterK * (m_lines[ch].read(ms * perMs) - f[2]);
-						f[3] += m_filterK * (f[2] - f[3]);
-						out[ch] = in[ch] + mix * (f[3] - in[ch]);
+						m_phase[p] += m_lfoStep[p];
+						if(m_phase[p] >= 1.0f)
+							m_phase[p] -= 1.0f;
+						const float lfo = 1.0f - 4.0f * std::fabs(m_phase[p] - 0.5f);
+						const float ms[2] = {std::max((CentreMs + m_depth[p] * lfo) * (1.0f - ClockTrim), MinMs),
+						                     std::max((CentreMs - m_depth[p] * lfo) * (1.0f + ClockTrim), MinMs)};
+						for(int ch = 0; ch < 2; ++ch)
+						{
+							// the charge lost along the stages grows as the clock slows
+							const float clock = std::max(Stages / (2.0f * ms[ch] * 0.001f), MinClock);
+							const float gain = (ch ? 1.0f - GainTrim : 1.0f + GainTrim) * (1.0f - CteLoss * (1.0f / clock - 1.0f / CentreClock));
+							wet[ch] += gain * m_lines[2 * p + ch].process(in[ch], ms[ch] * 0.001f * m_rate);
+						}
 					}
-					_outL[i] = out[0];
-					_outR[i] = out[1];
+					// two pairs together as loud as one
+					if(m_pairs == 2)
+					{
+						wet[0] *= 0.7071f;
+						wet[1] *= 0.7071f;
+					}
+
+					// the summer of each output: dry and wet, at the share the mix gives, as loud
+					// together as the dry sound alone; while the chorus fades the dry sound fills in
+					const float dryShare = std::min(1.0f, 2.0f - 2.0f * m_mix);
+					const float dry = dryShare * (1.0f - m_fade * (1.0f - DryGain)) + (1.0f - m_fade) * (1.0f - dryShare);
+					const float wetGain = std::min(1.0f, 2.0f * m_mix) * m_fade * WetGain;
+					const float norm = 1.0f / std::sqrt(std::max(dry * dry + wetGain * wetGain, 1.0e-6f));
+					_outL[i] = norm * (dry * in[0] + wetGain * wet[0]);
+					_outR[i] = norm * (dry * in[1] + wetGain * wet[1]);
 				}
 			}
 
 		private:
-			double m_rate = 48000.0;
-			std::array<Line, 2> m_lines;
-			std::array<std::array<float, 4>, 2> m_filters{};
-			float m_filterK = 0.5f;
-			float m_smoothK = 0.001f;
-			float m_depth = -1.0f;
-			double m_phase = 0.0;
+			// the filter before and after the chip: a Butterworth pair at 9661 Hz and a pole at
+			// 20 kHz, as the emitter followers of the instrument measure
+			struct BbdFilter
+			{
+				float g = 0.0f, a1 = 0.0f, gPole = 0.0f;
+				float ic1 = 0.0f, ic2 = 0.0f, pole = 0.0f;
+
+				void prepare(const float _rate)
+				{
+					g = std::tan(static_cast<float>(Pi) * std::min(9661.0f, _rate * 0.45f) / _rate);
+					a1 = 1.0f / (1.0f + g / 0.7071f + g * g);
+					gPole = std::tan(static_cast<float>(Pi) * std::min(20000.0f, _rate * 0.45f) / _rate);
+				}
+				void clear() { ic1 = ic2 = pole = 0.0f; }
+				float process(const float _x)
+				{
+					const float v3 = _x - ic2;
+					const float v1 = a1 * ic1 + a1 * g * v3;
+					const float v2 = ic2 + g * v1;
+					ic1 = 2.0f * v1 - ic1;
+					ic2 = 2.0f * v2 - ic2;
+					const float v = (v2 - pole) * gPole / (1.0f + gPole);
+					const float lp = pole + v;
+					pole = lp + v;
+					return lp;
+				}
+			};
+
+			// one chip: filtered, softly saturated, delayed and read between samples (Hermite),
+			// filtered again
+			struct BbdLine
+			{
+				std::vector<float> buf;
+				int mask = 0, pos = 0;
+				BbdFilter pre, post;
+
+				void prepare(const float _rate)
+				{
+					int len = 1;
+					while(len < static_cast<int>(_rate * 0.02f) + 4)
+						len <<= 1;
+					buf.assign(static_cast<size_t>(len), 0.0f);
+					mask = len - 1;
+					pre.prepare(_rate);
+					post.prepare(_rate);
+				}
+				void clear()
+				{
+					std::fill(buf.begin(), buf.end(), 0.0f);
+					pos = 0;
+					pre.clear();
+					post.clear();
+				}
+				float process(const float _x, const float _delay)
+				{
+					const float filtered = pre.process(_x);
+					buf[static_cast<size_t>(pos & mask)] = std::tanh(filtered * Drive) / Drive;
+					float r = static_cast<float>(pos) - _delay;
+					if(r < 0.0f)
+						r += static_cast<float>(mask + 1);
+					const int i1 = static_cast<int>(r);
+					const float f = r - static_cast<float>(i1);
+					const float y0 = buf[static_cast<size_t>((i1 - 1) & mask)], y1 = buf[static_cast<size_t>(i1 & mask)];
+					const float y2 = buf[static_cast<size_t>((i1 + 1) & mask)], y3 = buf[static_cast<size_t>((i1 + 2) & mask)];
+					const float c1 = 0.5f * (y2 - y0);
+					const float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+					const float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
+					const float wet = ((c3 * f + c2) * f + c1) * f + y1;
+					pos = (pos + 1) & mask;
+					return post.process(wet);
+				}
+			};
+
+			// I and II each on the first pair of lines; I+II both, II on the second pair
+			void setMode(const int _mode)
+			{
+				m_mode = _mode;
+				const int first = _mode == 1 ? 1 : 0;
+				m_pairs = _mode == 2 ? 2 : 1;
+				for(int p = 0; p < m_pairs; ++p)
+				{
+					const int kind = p == 0 ? first : 1;
+					m_lfoStep[p] = Rates[kind] / m_rate;
+					m_depthTarget[p] = Depths[kind];
+					if(m_fade <= 0.0f)
+						m_depth[p] = m_depthTarget[p];
+				}
+				// the second pair starts empty, and is heard only once its lines are full
+				if(m_pairs == 2)
+				{
+					m_lines[2].clear();
+					m_lines[3].clear();
+					m_hold = static_cast<int>(0.008f * m_rate);
+				}
+			}
+
+			// I as the instrument measures; II faster as the instrument and deeper than its 1.71 ms
+			static constexpr float Rates[2] = {0.514f, 0.842f};   // Hz
+			static constexpr float Depths[2] = {2.13f, 2.4f};     // ms, half the swing
+
+			static constexpr float CentreMs = 3.30f;
+			static constexpr float MinMs = 0.1f;
+			static constexpr float Stages = 256.0f;
+			static constexpr float MinClock = 5000.0f;
+			static constexpr float CentreClock = 40000.0f;
+			static constexpr float CteLoss = 4468.0f;
+			static constexpr float ClockTrim = 0.015f;
+			static constexpr float GainTrim = 0.04f;
+			static constexpr float DryGain = 0.863f;
+			static constexpr float WetGain = 1.257f;
+			static constexpr float Drive = 0.12f;
+			static constexpr float FadeMs = 5.0f;
+
+			float m_rate = 48000.0f;
+			std::array<BbdLine, 4> m_lines;   // two pairs, left and right
+			int m_pairs = 1;
+			int m_hold = 0;   // samples before the chorus may fade in
+			std::array<float, 2> m_phase{}, m_lfoStep{}, m_depth{}, m_depthTarget{};
+			int m_mode = -1;
+			float m_fade = 0.0f, m_fadeStep = 0.001f;
+			float m_mix = -1.0f, m_smoothK = 0.001f;
 		};
 
 		// Six first-order allpass stages per side, swept by a sine LFO, a quarter cycle apart
@@ -499,38 +648,11 @@ namespace fxLib
 
 		// ── Reverb ──────────────────────────────────────────────────────────────
 
-		// Octave up for the shimmer: two taps that run through a window at twice the speed of
-		// the writing, crossfaded so that each restarts while the other is at full level.
-		struct OctaveUp
-		{
-			Line line;
-			double window = 1.0;
-			double phase = 0.0;
-
-			void resize(const double _window) { window = _window; line.resize(static_cast<size_t>(_window) + 8); phase = 0.0; }
-			void clear() { line.clear(); phase = 0.0; }
-			float process(const float _x)
-			{
-				line.write(_x);
-				phase += 1.0 / window;
-				if(phase >= 1.0)
-					phase -= 1.0;
-				const double other = phase >= 0.5 ? phase - 0.5 : phase + 0.5;
-				const auto tap = [&](const double _p)
-				{
-					const double w = std::sin(Pi * _p);
-					return static_cast<float>(w * w) * line.read(1.0 + (1.0 - _p) * (window - 2.0));
-				};
-				return tap(phase) + tap(other);
-			}
-		};
-
-		// The reverberation of the hall, the room and the cloud: a predelay with early
-		// reflections taken from it, allpass diffusers that blur the attack, and eight delay
-		// lines feeding each other through a Householder matrix. Each line has a lowpass so
-		// that the highs die first, a low cut, may have a diffuser of its own inside the loop,
-		// and is moved slowly so that the tail does not ring; the shimmer puts the tail back
-		// an octave up. Left and right are taken from different lines.
+		// The reverberation of the hall and the room: a predelay with early reflections taken
+		// from it, allpass diffusers that blur the attack, and eight delay lines feeding each
+		// other through a Householder matrix. Each line has a lowpass so that the highs die
+		// first and a low cut, and is moved slowly so that the tail does not ring. Left and
+		// right are taken from different lines.
 		class Fdn
 		{
 		public:
@@ -543,9 +665,6 @@ namespace fxLib
 				double maxSize;
 				double maxPredelay;   // seconds
 				double maxModMs;
-				bool inner;           // diffusers inside the loop
-				bool early;           // early reflections
-				bool shimmer;
 			};
 
 			struct Params
@@ -556,9 +675,7 @@ namespace fxLib
 				double lowCut = 0.0;
 				double predelay = 0.0;     // seconds
 				float diffusion = 0.7f;    // of the diffusers in front, 0-1
-				float innerDiffusion = 0.0f;
 				double modMs = 0.3;
-				float shimmer = 0.0f;
 				float early = 0.0f;        // level of the early reflections
 				float late = 1.0f;         // and of the tail
 				float dry = 1.0f, wet = 0.5f;
@@ -570,15 +687,11 @@ namespace fxLib
 				m_layout = std::move(_layout);
 				const double perMs = _rate / 1000.0;
 				for(int i = 0; i < Lines; ++i)
-				{
 					m_lines[i].resize(static_cast<size_t>((m_layout.lineMs[i] * m_layout.maxSize + m_layout.maxModMs) * perMs) + 16);
-					m_inner[i].resize(InnerMs[i] * perMs);
-				}
 				m_diffusers.resize(m_layout.diffuseMs.size());
 				for(size_t d = 0; d < m_diffusers.size(); ++d)
 					m_diffusers[d].resize(m_layout.diffuseMs[d] * perMs);
 				m_predelay.resize(static_cast<size_t>((m_layout.maxPredelay + 0.04) * _rate) + 16);
-				m_octave.resize(0.08 * _rate);
 				m_smooth = static_cast<float>(1.0 - std::exp(-1.0 / (0.08 * _rate)));
 				clear();
 			}
@@ -586,14 +699,11 @@ namespace fxLib
 			void clear()
 			{
 				for(auto& l : m_lines) l.clear();
-				for(auto& a : m_inner) a.line.clear();
 				for(auto& d : m_diffusers) d.line.clear();
 				m_predelay.clear();
-				m_octave.clear();
 				m_damp.fill(0.0f);
 				m_low.fill(0.0f);
 				m_length.fill(-1.0);
-				m_shimmerTone = 0.0f;
 				m_phase = 0.0;
 			}
 
@@ -604,10 +714,7 @@ namespace fxLib
 				const float lowK = _p.lowCut > 0.0 ? onePole(_p.lowCut, m_rate) : 0.0f;
 				const double predelay = std::clamp(_p.predelay, 0.0, m_layout.maxPredelay) * m_rate + 1.0;
 				const float diffusion = 0.75f * _p.diffusion;
-				const float innerG = 0.6f * _p.innerDiffusion;
 				const double modDepth = std::min(_p.modMs, m_layout.maxModMs) * perMs;
-				const float shimmer = m_layout.shimmer ? 0.55f * _p.shimmer : 0.0f;
-				const float shimmerK = onePole(6000.0, m_rate);
 
 				// each line loses 60 dB over the reverberation time, in proportion to its length
 				std::array<double, Lines> target{};
@@ -628,7 +735,7 @@ namespace fxLib
 
 					// early reflections, taps after the predelay, a different set each side
 					float earlyL = 0.0f, earlyR = 0.0f;
-					if(m_layout.early && _p.early > 0.0f)
+					if(_p.early > 0.0f)
 					{
 						for(int t = 0; t < 6; ++t)
 						{
@@ -651,8 +758,6 @@ namespace fxLib
 						// two slow sines a line, so that the movement does not repeat soon
 						const double m = 0.5 + 0.25 * (std::sin(m_phase * ModRate[i] + i) + std::sin(m_phase * ModRate[i] * 1.618 + 2.0 * i));
 						float y = m_lines[i].read(m_length[i] + modDepth * m);
-						if(m_layout.inner && innerG > 0.01f)
-							y = m_inner[i].process(y, innerG);
 						m_damp[i] += dampK * (y - m_damp[i]);
 						y = m_damp[i];
 						if(lowK > 0.0f)
@@ -664,17 +769,9 @@ namespace fxLib
 						sum += y;
 					}
 
-					// the tail an octave up, darkened, back into the lines
-					float lift = 0.0f;
-					if(shimmer > 0.0f)
-					{
-						m_shimmerTone += shimmerK * (m_octave.process(sum * 0.25f) - m_shimmerTone);
-						lift = shimmer * m_shimmerTone;
-					}
-
 					const float mixBack = sum * (2.0f / Lines);
 					for(int i = 0; i < Lines; ++i)
-						m_lines[i].write((x + lift) * InputSign[i] * 0.35f + gain[i] * (out[i] - mixBack));
+						m_lines[i].write(x * InputSign[i] * 0.35f + gain[i] * (out[i] - mixBack));
 
 					m_phase += TwoPi / m_rate;
 					if(m_phase > TwoPi * 1000.0)
@@ -688,7 +785,6 @@ namespace fxLib
 			}
 
 		private:
-			static constexpr double InnerMs[Lines] = {3.1, 4.7, 5.3, 6.1, 7.3, 8.9, 9.7, 11.3};
 			static constexpr float InputSign[Lines] = {1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f};
 			static constexpr double ModRate[Lines] = {0.31, 0.47, 0.67, 0.23, 0.53, 0.37, 0.79, 0.43};   // Hz
 			static constexpr double EarlyMsL[6] = {4.3, 7.1, 11.9, 15.7, 21.1, 26.3};
@@ -698,13 +794,10 @@ namespace fxLib
 			double m_rate = 48000.0;
 			Layout m_layout{};
 			std::array<Line, Lines> m_lines;
-			std::array<Allpass, Lines> m_inner;
 			std::vector<Allpass> m_diffusers;
 			Line m_predelay;
-			OctaveUp m_octave;
 			std::array<float, Lines> m_damp{}, m_low{};
 			std::array<double, Lines> m_length{};
-			float m_shimmerTone = 0.0f;
 			float m_smooth = 0.001f;
 			double m_phase = 0.0;
 		};
@@ -715,7 +808,7 @@ namespace fxLib
 		public:
 			void prepare(const double _rate) override
 			{
-				m_fdn.prepare(_rate, {{29.7, 37.1, 41.1, 43.7, 53.0, 59.3, 67.9, 73.1}, {4.77, 3.59, 12.73, 9.30}, 2.0, 0.2, 0.6, false, true, false});
+				m_fdn.prepare(_rate, {{29.7, 37.1, 41.1, 43.7, 53.0, 59.3, 67.9, 73.1}, {4.77, 3.59, 12.73, 9.30}, 2.0, 0.2, 0.6});
 				played = false;
 			}
 			void clear() override { m_fdn.clear(); played = false; }
@@ -747,7 +840,7 @@ namespace fxLib
 		public:
 			void prepare(const double _rate) override
 			{
-				m_fdn.prepare(_rate, {{7.3, 9.1, 10.7, 12.3, 13.9, 15.7, 17.3, 19.1}, {2.3, 3.7}, 1.6, 0.03, 0.25, false, true, false});
+				m_fdn.prepare(_rate, {{7.3, 9.1, 10.7, 12.3, 13.9, 15.7, 17.3, 19.1}, {2.3, 3.7}, 1.6, 0.03, 0.25});
 				played = false;
 			}
 			void clear() override { m_fdn.clear(); played = false; }
@@ -771,40 +864,344 @@ namespace fxLib
 			Fdn m_fdn;
 		};
 
-		// The cloud: an enormous, dense ambient reverberation in the manner of the Cloud
-		// of a Strymon BigSky. Six diffusers in front and one inside every line of a long
-		// tank: with diffusion low the attacks come through grainy, raised the sound blooms
-		// into a smooth, soft cloud. Low End sets how much bass the cloud keeps, Tone the
-		// highs from dark (left) through warm (middle) to open (right), Mod a slow wander of
-		// the lines, Shimmer the tail fed back an octave up.
-		// Controls: decay (1 to 40 s), diffusion, low end, tone, mod, shimmer, predelay (to
-		// 300 ms), mix.
-		class Cloud final : public OwnEffect
+		// The transposer of the shimmer: a phase vocoder. Frames of 2048 samples, a new one
+		// every 512, are taken to the spectrum; there every partial is moved to its frequency
+		// times the ratio of the pitch, its phase carried on from frame to frame, and the
+		// frames are brought back and added up. A held sound comes out held, without the
+		// flutter of grains: Shimmer-Reverb transposes with grains, which here fluttered at
+		// the rate they started (some 40 times a second) and crackled as the feedback piled
+		// them up. The tail of a reverberation loses nothing by the smearing of its attacks.
+		// The pitch glides to a new setting, a step every block. One for both sides.
+		class SpectralShift
+		{
+		public:
+			// _quarter: which quarter of a hop the frames of this one fall on, so that two of them
+			// (and their two sides) never work out a frame in the same block
+			void prepare(const int _quarter)
+			{
+				m_quarter = _quarter;
+				for(int i = 0; i < Size; ++i)
+					m_window[static_cast<size_t>(i)] = static_cast<float>(0.5 - 0.5 * std::cos(TwoPi * i / Size));
+				for(int i = 0; i < Size / 2; ++i)
+				{
+					m_twiddleRe[static_cast<size_t>(i)] = static_cast<float>(std::cos(-TwoPi * i / Size));
+					m_twiddleIm[static_cast<size_t>(i)] = static_cast<float>(std::sin(-TwoPi * i / Size));
+				}
+				for(int i = 0, j = 0; i < Size; ++i)
+				{
+					m_reverse[static_cast<size_t>(i)] = j;
+					int bit = Size >> 1;
+					while(j & bit) { j ^= bit; bit >>= 1; }
+					j |= bit;
+				}
+				clear();
+			}
+
+			void clear()
+			{
+				for(auto& c : m_ch)
+				{
+					c.in.fill(0.0f);
+					c.out.fill(0.0f);
+					c.prevRe.fill(0.0f);
+					c.prevIm.fill(0.0f);
+					c.sumPhase.fill(0.0f);
+				}
+				// the sides half a hop apart
+				m_ch[0].fill = m_quarter * Hop / 4;
+				m_ch[1].fill = m_ch[0].fill + Hop / 2;
+				m_glided = m_semitones;
+				m_ratio = std::pow(2.0, m_semitones / 12.0);
+			}
+
+			void setSemitones(const float _st) { m_semitones = _st; }
+
+			void process(const float* _inL, const float* _inR, float* _outL, float* _outR, const int _n)
+			{
+				m_glided = 0.995f * m_glided + 0.005f * m_semitones;
+				m_ratio = 0.995 * m_ratio + 0.005 * std::pow(2.0, m_glided / 12.0);
+				const float* in[2] = {_inL, _inR};
+				float* out[2] = {_outL, _outR};
+				for(int i = 0; i < _n; ++i)
+				{
+					// the frame runs Size samples behind: a sample goes in where one comes out
+					for(int ch = 0; ch < 2; ++ch)
+					{
+						auto& c = m_ch[static_cast<size_t>(ch)];
+						c.in[static_cast<size_t>(Size - Hop + c.fill)] = in[ch][i];
+						out[ch][i] = c.out[static_cast<size_t>(c.fill)];
+						if(++c.fill == Hop)
+						{
+							c.fill = 0;
+							frame(c);
+						}
+					}
+				}
+			}
+
+		private:
+			static constexpr int Size = 2048;
+			static constexpr int Hop = Size / 4;
+			static constexpr int Bins = Size / 2 + 1;
+
+			struct Channel
+			{
+				std::array<float, Size> in{}, out{};
+				std::array<float, Bins> prevRe{}, prevIm{}, sumPhase{};
+				int fill = 0;   // samples into the hop
+			};
+
+			void fft(float* _re, float* _im, const bool _inverse) const
+			{
+				for(int i = 0; i < Size; ++i)
+				{
+					const int j = m_reverse[static_cast<size_t>(i)];
+					if(j > i)
+					{
+						std::swap(_re[i], _re[j]);
+						std::swap(_im[i], _im[j]);
+					}
+				}
+				for(int len = 2; len <= Size; len <<= 1)
+				{
+					const int half = len >> 1, step = Size / len;
+					for(int s = 0; s < Size; s += len)
+					{
+						for(int k = 0; k < half; ++k)
+						{
+							const float wr = m_twiddleRe[static_cast<size_t>(k * step)];
+							const float wi = _inverse ? -m_twiddleIm[static_cast<size_t>(k * step)] : m_twiddleIm[static_cast<size_t>(k * step)];
+							const int a = s + k, b = a + half;
+							const float tr = _re[b] * wr - _im[b] * wi;
+							const float ti = _re[b] * wi + _im[b] * wr;
+							_re[b] = _re[a] - tr;
+							_im[b] = _im[a] - ti;
+							_re[a] += tr;
+							_im[a] += ti;
+						}
+					}
+				}
+			}
+
+			void frame(Channel& _c)
+			{
+				constexpr float expected = static_cast<float>(TwoPi * Hop / Size);   // a bin's phase step a hop
+				constexpr float twoPi = static_cast<float>(TwoPi);
+				std::array<float, Size> re{}, im{};
+				for(int i = 0; i < Size; ++i)
+					re[static_cast<size_t>(i)] = _c.in[static_cast<size_t>(i)] * m_window[static_cast<size_t>(i)];
+				fft(re.data(), im.data(), false);
+
+				// the peaks of the spectrum, by their power
+				std::array<float, Bins> power{};
+				float loudest = 0.0f;
+				for(int k = 0; k < Bins; ++k)
+				{
+					power[k] = re[k] * re[k] + im[k] * im[k];
+					loudest = std::max(loudest, power[k]);
+				}
+				std::array<int, Bins> peaks{};
+				int count = 0;
+				for(int k = 1; k < Bins - 1; ++k)
+					if(power[k] > power[k - 1] && power[k] >= power[k + 1] && power[k] > loudest * 1.0e-10f)
+						peaks[count++] = k;
+
+				// Moved by the ratio, each peak with the bins around it as one piece, so that the
+				// shape of every partial stays whole: the bins of a piece keep their phases against
+				// its peak (Laroche and Dolson's phase locking), and the peak's phase runs on at its
+				// new frequency from where that bin had it a frame before. The true frequency of a
+				// peak comes from how far its phase moved since the frame before; a piece is turned
+				// by one rotation, so that only the peaks need an angle.
+				const auto ratio = static_cast<float>(m_ratio);
+				std::array<float, Size> outRe{}, outIm{};
+				std::array<float, Bins> carried = _c.sumPhase;
+				for(int i = 0; i < count; ++i)
+				{
+					const int p = peaks[i];
+					const int lo = i == 0 ? 0 : (peaks[i - 1] + p + 1) / 2;
+					const int hi = i == count - 1 ? Bins - 1 : (p + peaks[i + 1]) / 2;
+					const float phase = std::atan2(im[p], re[p]);
+					float moved = phase - std::atan2(_c.prevIm[p], _c.prevRe[p]) - p * expected;
+					moved -= twoPi * std::round(moved / twoPi);
+					const float target = (p + moved / expected) * ratio;
+					const int q = static_cast<int>(std::lround(target));
+					if(q < 0 || q >= Bins)
+						continue;
+					float peakPhase = _c.sumPhase[q] + target * expected;
+					peakPhase -= twoPi * std::floor(peakPhase / twoPi);
+					const float turn = peakPhase - phase;
+					const float c = std::cos(turn), s = std::sin(turn);
+					const int shift = q - p;
+					for(int k = std::max(lo, -shift); k <= hi && k + shift < Bins; ++k)
+					{
+						const int o = k + shift;
+						outRe[o] += re[k] * c - im[k] * s;
+						outIm[o] += re[k] * s + im[k] * c;
+						carried[o] = peakPhase;
+					}
+				}
+				_c.sumPhase = carried;
+				std::copy(re.begin(), re.begin() + Bins, _c.prevRe.begin());
+				std::copy(im.begin(), im.begin() + Bins, _c.prevIm.begin());
+
+				// back to sound
+				for(int k = 1; k < Size / 2; ++k)
+				{
+					outRe[Size - k] = outRe[k];
+					outIm[Size - k] = -outIm[k];
+				}
+				fft(outRe.data(), outIm.data(), true);
+
+				// windowed again and added; Hann twice at a quarter hop adds up to 1.5
+				constexpr float scale = 1.0f / (Size * 1.5f);
+				std::copy(_c.out.begin() + Hop, _c.out.end(), _c.out.begin());
+				std::fill(_c.out.end() - Hop, _c.out.end(), 0.0f);
+				for(int i = 0; i < Size; ++i)
+					_c.out[static_cast<size_t>(i)] += outRe[static_cast<size_t>(i)] * m_window[static_cast<size_t>(i)] * scale;
+				std::copy(_c.in.begin() + Hop, _c.in.end(), _c.in.begin());
+			}
+
+			std::array<Channel, 2> m_ch;
+			std::array<float, Size> m_window{};
+			std::array<float, Size / 2> m_twiddleRe{}, m_twiddleIm{};
+			std::array<int, Size> m_reverse{};
+			int m_quarter = 0;
+			float m_semitones = 12.0f, m_glided = 12.0f;
+			double m_ratio = 2.0;
+		};
+
+		// A filter of two poles, as JUCE's IIR high and low pass with Q 0.707, for both sides
+		struct Biquad
+		{
+			float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
+			std::array<float, 2> z1{}, z2{};
+
+			void set(const bool _high, const double _hz, const double _rate)
+			{
+				const double n = 1.0 / std::tan(Pi * std::min(_hz, _rate * 0.45) / _rate);
+				const double n2 = n * n, q = 1.4142135623730951;   // 1 / Q
+				const double c1 = 1.0 / (1.0 + q * n + n2);
+				b0 = static_cast<float>(_high ? c1 * n2 : c1);
+				b1 = static_cast<float>(_high ? -2.0 * c1 * n2 : 2.0 * c1);
+				b2 = b0;
+				a1 = static_cast<float>(c1 * 2.0 * (1.0 - n2));
+				a2 = static_cast<float>(c1 * (1.0 - q * n + n2));
+			}
+			void clear() { z1.fill(0.0f); z2.fill(0.0f); }
+			float process(const int _ch, const float _x)
+			{
+				const float y = b0 * _x + z1[_ch];
+				z1[_ch] = b1 * _x - a1 * y + z2[_ch];
+				z2[_ch] = b2 * _x - a2 * y;
+				return y;
+			}
+		};
+
+		// The shimmer of Shimmer-Reverb by Danial Kooshki (MIT licence, see fxZitaRev.h): the
+		// zita-rev1 reverberator, whose tail is filtered (low cut, high cut), transposed in two
+		// layers, A and B, each at its own level (by a phase vocoder here, by grains there),
+		// softly limited and fed back into the reverberator with the feedback, block by block,
+		// so that it climbs interval by interval. The dry sound is mixed outside the reverberator. Layers C and D of the
+		// original, off there by default, are left out.
+		// Controls: decay (1 to 8 s), low decay (1 to 8 s), tone (the damping of the highs,
+		// 1.5 to 12 kHz), pitch A, level A, pitch B, level B (-24 to +24 semitones each),
+		// feedback, low cut (50 to 600 Hz), high cut (3 to 12 kHz), mix.
+		class Shimmer final : public OwnEffect
 		{
 		public:
 			void prepare(const double _rate) override
 			{
-				m_fdn.prepare(_rate, {{67.3, 79.1, 89.7, 101.3, 113.9, 127.1, 139.7, 151.3}, {4.1, 5.9, 7.7, 11.3, 15.1, 19.7}, 1.0, 0.3, 2.5, true, false, true});
+				m_rate = _rate;
+				if(!m_zita)
+					m_zita = std::make_unique<zita::ZitaRev>();
+				m_zita->init(static_cast<int>(_rate));
+				m_zita->setWetDry(-1.0f);       // the reverberation alone
+				m_zita->setOutputLevel(0.0f);
+				m_layers[0].prepare(0);
+				m_layers[1].prepare(1);
+				clear();
+			}
+
+			void clear() override
+			{
+				if(m_zita)
+					m_zita->instanceClear();
+				for(auto& t : m_layers)
+					t.clear();
+				m_lowCut.clear();
+				m_highCut.clear();
+				m_backL.fill(0.0f);
+				m_backR.fill(0.0f);
 				played = false;
 			}
-			void clear() override { m_fdn.clear(); played = false; }
+
 			void process(const float* _inL, const float* _inR, float* _outL, float* _outR, const int _samples, const float* _v, double, double) override
 			{
-				Fdn::Params p;
-				p.rt60 = std::pow(40.0, static_cast<double>(_v[0]));
-				p.diffusion = _v[1];
-				p.innerDiffusion = _v[1];
-				p.lowCut = 500.0 * std::pow(25.0, -static_cast<double>(_v[2]));   // 500 Hz down to 20
-				p.cutoff = 1000.0 * std::pow(18.0, static_cast<double>(_v[3]));   // 1 kHz up to 18
-				p.modMs = 2.5 * _v[4];
-				p.shimmer = _v[5];
-				p.predelay = 0.3 * _v[6];
-				p.dry = dryShare(_v[7]);
-				p.wet = wetShare(_v[7]);
-				m_fdn.process(_inL, _inR, _outL, _outR, _samples, p);
+				m_zita->setDecay(1.0f + 7.0f * _v[0]);
+				m_zita->setLowRT60(1.0f + 7.0f * _v[1]);
+				m_zita->setHFDamping(1500.0f + 10500.0f * _v[2]);
+				m_layers[0].setSemitones(static_cast<float>(semitonesOf(_v[3])));
+				m_layers[1].setSemitones(static_cast<float>(semitonesOf(_v[5])));
+				const float gain[2] = {_v[4], _v[6]};
+				const float feedback = FeedbackMost * _v[7];
+				m_lowCut.set(true, 50.0 + 550.0 * _v[8], m_rate);
+				m_highCut.set(false, 3000.0 + 9000.0 * _v[9], m_rate);
+				const float dry = dryShare(_v[10]), wet = wetShare(_v[10]);
+
+				// in blocks, as the original goes round once a block
+				for(int done = 0; done < _samples; done += Block)
+				{
+					const int n = std::min(Block, _samples - done);
+					std::array<float, Block> inL, inR, wetL, wetR, loopL, loopR, layL, layR;
+					for(int i = 0; i < n; ++i)
+					{
+						inL[i] = _inL[done + i] + feedback * m_backL[i];
+						inR[i] = _inR[done + i] + feedback * m_backR[i];
+					}
+					float* ins[2] = {inL.data(), inR.data()};
+					float* outs[2] = {wetL.data(), wetR.data()};
+					m_zita->compute(n, ins, outs);
+
+					// the tail, low and high cut, through the two layers and back next block
+					for(int i = 0; i < n; ++i)
+					{
+						loopL[i] = m_highCut.process(0, m_lowCut.process(0, wetL[i]));
+						loopR[i] = m_highCut.process(1, m_lowCut.process(1, wetR[i]));
+					}
+					m_backL.fill(0.0f);
+					m_backR.fill(0.0f);
+					for(int k = 0; k < 2; ++k)
+					{
+						m_layers[k].process(loopL.data(), loopR.data(), layL.data(), layR.data(), n);
+						for(int i = 0; i < n; ++i)
+						{
+							m_backL[i] += gain[k] * layL[i];
+							m_backR[i] += gain[k] * layR[i];
+						}
+					}
+					for(int i = 0; i < n; ++i)
+					{
+						m_backL[i] = std::tanh(m_backL[i] * Makeup * 0.85f * 1.5f);
+						m_backR[i] = std::tanh(m_backR[i] * Makeup * 0.85f * 1.5f);
+						_outL[done + i] = dry * _inL[done + i] + wet * wetL[i];
+						_outR[done + i] = dry * _inR[done + i] + wet * wetR[i];
+					}
+				}
 			}
+
 		private:
-			Fdn m_fdn;
+			static constexpr int Block = 256;
+			// The loop of the original gives back so little (the reverberator about a third, its
+			// grains about a third, the feedback at most 0.35) that the shimmer stays 25 to 35 dB
+			// under the sound: here the feedback reaches 0.7 and the layers are raised by 2.5, so
+			// that it is heard, and still dies away at every setting.
+			static constexpr float FeedbackMost = 0.7f;
+			static constexpr float Makeup = 1.8f;
+			double m_rate = 48000.0;
+			std::unique_ptr<zita::ZitaRev> m_zita;   // large: its lines are inside it
+			std::array<SpectralShift, 2> m_layers;
+			Biquad m_lowCut, m_highCut;
+			std::array<float, Block> m_backL{}, m_backR{};
 		};
 
 		// A plate: the figure-of-eight tank Jon Dattorro published in "Effect Design" (1997),
@@ -1034,5 +1431,5 @@ namespace fxLib
 	std::unique_ptr<OwnEffect> createRoom() { return std::make_unique<Room>(); }
 	std::unique_ptr<OwnEffect> createPlate() { return std::make_unique<Plate>(); }
 	std::unique_ptr<OwnEffect> createSpring() { return std::make_unique<Spring>(); }
-	std::unique_ptr<OwnEffect> createCloud() { return std::make_unique<Cloud>(); }
+	std::unique_ptr<OwnEffect> createShimmer() { return std::make_unique<Shimmer>(); }
 }

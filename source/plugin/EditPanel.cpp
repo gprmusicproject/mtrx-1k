@@ -1858,10 +1858,14 @@ namespace retromulator
         constexpr int kRackGap    = 8;
         constexpr int kRackEar    = 28;
         constexpr int kFxNameX    = kFxLeft + kRackEar + 16;
-        constexpr int kFxTypeX    = kFxLeft + 262;
+        constexpr int kFxTypeX    = kFxLeft + 132;
         constexpr int kFxTypeW    = 80;
-        constexpr int kFxKnobX    = kFxLeft + 548;
-        constexpr int kFxKnobW    = 62;
+        // room for the most controls a type has, ending where eight of 62 once did
+        constexpr int kFxKnobW    = 58;
+        constexpr int kFxKnobX    = kFxLeft + 1044 - fxLib::MaxControls * kFxKnobW;
+        // in the bar of the chain: where the order of the racks starts, and its mix
+        constexpr int kFxFlowX    = kFxLeft + 196;
+        constexpr int kFxMixX     = kFxLeft + 610;
         // in a rack: the knobs from this height, their centres at the other; the keys of the
         // types and the switch of the rack are centred on the same line
         constexpr int kFxKnobTop    = 42;
@@ -1902,6 +1906,36 @@ namespace retromulator
             g.drawFittedText(legend, r.withTrimmedLeft(18.0f).toNearestInt(), juce::Justification::centred, 1, 0.7f);
         }
 
+        // A knob of the effects in an area: its track, the arc of the value, the face and the
+        // pointer
+        void drawFxKnob(juce::Graphics& g, const Style& st, const juce::Rectangle<float> area, const float v, const float stroke)
+        {
+            const float r = juce::jmin(area.getWidth(), area.getHeight()) * 0.5f - 3.0f;
+            const float cx = area.getCentreX();
+            const float cy = area.getCentreY();
+            constexpr float sweep = juce::MathConstants<float>::pi * 0.75f;
+
+            juce::Path track;
+            track.addCentredArc(cx, cy, r, r, 0.0f, -sweep, sweep, true);
+            g.setColour(juce::Colour(st.knobTrack));
+            g.strokePath(track, juce::PathStrokeType(stroke, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+            if(v > 0.0f)
+            {
+                juce::Path arc;
+                arc.addCentredArc(cx, cy, r, r, 0.0f, -sweep, -sweep + v * sweep * 2.0f, true);
+                g.setColour(juce::Colour(st.knobArc));
+                g.strokePath(arc, juce::PathStrokeType(stroke, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+            }
+            const float face = r - stroke * 1.6f;
+            g.setGradientFill(juce::ColourGradient(juce::Colour(st.knobFaceTop), cx, cy - face, juce::Colour(st.knobFaceBottom), cx, cy + face, false));
+            g.fillEllipse(cx - face, cy - face, face * 2, face * 2);
+            // the pointer
+            const float angle = -sweep + v * sweep * 2.0f;
+            g.setColour(juce::Colour(st.value).withAlpha(0.8f));
+            g.drawLine(cx + std::sin(angle) * face * 0.55f, cy - std::cos(angle) * face * 0.55f,
+                       cx + std::sin(angle) * face * 0.92f, cy - std::cos(angle) * face * 0.92f, stroke > 3.0f ? 2.0f : 1.6f);
+        }
+
         // The switch of the chain or of one rack: a key with a lamp. Assignable.
         class FxPowerKey final : public EditPanel::Control
         {
@@ -1924,12 +1958,12 @@ namespace retromulator
 
             void learnTargets(std::vector<LearnTarget>& out) const override
             {
-                out.push_back({m_rack < 0 ? MidiLearn::kFxChainTarget : MidiLearn::kFxTargetFirst + m_rack * MidiLearn::kFxTargetsPerRack + MidiLearn::kFxRackOnControl, getLocalBounds()});
+                out.push_back({m_rack < 0 ? MidiLearn::kFxChainTarget : MidiLearn::fxRackOnTarget(m_rack), getLocalBounds()});
             }
 
             void paint(juce::Graphics& g) override
             {
-                drawLampKey(g, getLocalBounds().toFloat(), m_rack < 0 ? "Chain On" : "On", on(), chainOf(ctx) != nullptr);
+                drawLampKey(g, getLocalBounds().toFloat(), "On", on(), chainOf(ctx) != nullptr);
             }
 
             void mouseDown(const juce::MouseEvent&) override
@@ -2030,7 +2064,7 @@ namespace retromulator
             void learnTargets(std::vector<LearnTarget>& out) const override
             {
                 if(exists())
-                    out.push_back({MidiLearn::kFxTargetFirst + m_rack * MidiLearn::kFxTargetsPerRack + m_control, getLocalBounds()});
+                    out.push_back({MidiLearn::fxControlTarget(m_rack, m_control), getLocalBounds()});
             }
 
             void paint(juce::Graphics& g) override
@@ -2053,31 +2087,7 @@ namespace retromulator
                     return;
                 }
 
-                const auto area = b.removeFromTop(64).toFloat();
-                const float r = juce::jmin(area.getWidth(), area.getHeight()) * 0.5f - 3.0f;
-                const float cx = area.getCentreX();
-                const float cy = area.getCentreY();
-                constexpr float sweep = juce::MathConstants<float>::pi * 0.75f;
-
-                juce::Path track;
-                track.addCentredArc(cx, cy, r, r, 0.0f, -sweep, sweep, true);
-                g.setColour(juce::Colour(st.knobTrack));
-                g.strokePath(track, juce::PathStrokeType(3.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                if(v > 0.0f)
-                {
-                    juce::Path arc;
-                    arc.addCentredArc(cx, cy, r, r, 0.0f, -sweep, -sweep + v * sweep * 2.0f, true);
-                    g.setColour(juce::Colour(st.knobArc));
-                    g.strokePath(arc, juce::PathStrokeType(3.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                }
-                const float face = r - 5.5f;
-                g.setGradientFill(juce::ColourGradient(juce::Colour(st.knobFaceTop), cx, cy - face, juce::Colour(st.knobFaceBottom), cx, cy + face, false));
-                g.fillEllipse(cx - face, cy - face, face * 2, face * 2);
-                // the pointer
-                const float angle = -sweep + v * sweep * 2.0f;
-                g.setColour(juce::Colour(st.value).withAlpha(0.8f));
-                g.drawLine(cx + std::sin(angle) * face * 0.55f, cy - std::cos(angle) * face * 0.55f,
-                           cx + std::sin(angle) * face * 0.92f, cy - std::cos(angle) * face * 0.92f, 2.0f);
+                drawFxKnob(g, st, b.removeFromTop(64).toFloat(), v, 3.5f);
 
                 // the value under it; a synced delay time the delay cannot reach in red
                 g.setColour(reachableDivision() ? juce::Colour(st.value) : juce::Colour(kLedOn));
@@ -2224,6 +2234,85 @@ namespace retromulator
 
         private:
             int m_shown = -1;
+        };
+
+        // The mix of the chain against the instrument's own sound: its name, a small knob and
+        // the value, in a row. Assignable.
+        class FxChainMix final : public EditPanel::Control
+        {
+        public:
+            explicit FxChainMix(EditPanel::Context& context) : Control(context)
+            {
+                setTitle("FX chain mix");
+                setMouseCursor(juce::MouseCursor::PointingHandCursor);
+            }
+
+            void refresh() override
+            {
+                const auto* c = chainOf(ctx);
+                const float v = c ? c->getMix() : -1.0f;
+                if(v != m_shown)
+                {
+                    m_shown = v;
+                    repaint();
+                }
+            }
+
+            void learnTargets(std::vector<LearnTarget>& out) const override
+            {
+                out.push_back({MidiLearn::kFxChainMixTarget, getLocalBounds()});
+            }
+
+            void paint(juce::Graphics& g) override
+            {
+                const auto* c = chainOf(ctx);
+                const auto& st = style();
+                auto b = getLocalBounds();
+                g.setColour(juce::Colour(st.label).withAlpha(c ? 1.0f : 0.4f));
+                g.setFont(sans(10.0f));
+                g.drawText("Mix", b.removeFromLeft(26), juce::Justification::centredLeft, false);
+                if(!c)
+                    return;
+                const float v = c->getMix();
+                drawFxKnob(g, st, b.removeFromLeft(b.getHeight()).toFloat(), v, 2.5f);
+                g.setColour(juce::Colour(st.value));
+                g.setFont(sans(10.5f, true));
+                g.drawText(juce::String(juce::roundToInt(v * 100.0f)), b.withTrimmedLeft(6), juce::Justification::centredLeft, false);
+            }
+
+            void mouseDown(const juce::MouseEvent&) override
+            {
+                if(const auto* c = chainOf(ctx))
+                    m_dragStart = c->getMix();
+            }
+
+            void mouseDrag(const juce::MouseEvent& e) override
+            {
+                // as the knobs of the racks: the whole range over 160 pixels, a quarter of that speed with shift
+                const auto moved = static_cast<float>(e.getDistanceFromDragStartX() - e.getDistanceFromDragStartY());
+                set(m_dragStart + moved / (e.mods.isShiftDown() ? 640.0f : 160.0f));
+            }
+
+            void mouseDoubleClick(const juce::MouseEvent&) override { set(1.0f); }
+
+            void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
+            {
+                if(const auto* c = chainOf(ctx); c && wheel.deltaY != 0.0f)
+                    set(c->getMix() + (wheel.deltaY > 0.0f ? 0.01f : -0.01f));
+            }
+
+        private:
+            void set(const float v)
+            {
+                if(auto* c = chainOf(ctx))
+                {
+                    c->setMix(juce::jlimit(0.0f, 1.0f, v));
+                    refresh();
+                }
+            }
+
+            float m_shown = -2.0f;
+            float m_dragStart = 1.0f;
         };
     }
 
@@ -2686,7 +2775,8 @@ namespace retromulator
             m_fxControls.push_back(std::move(c));
         };
 
-        add(std::make_unique<FxPowerKey>(ctx, -1), {kFxLeft + 110, kFxBarY + 8, 104, 24});
+        add(std::make_unique<FxPowerKey>(ctx, -1), {kFxLeft + 110, kFxBarY + 9, 56, 22});
+        add(std::make_unique<FxChainMix>(ctx), {kFxMixX, kFxBarY + 2, 130, kFxBarH - 4});
         add(std::make_unique<FxTempo>(ctx), {kFxLeft + kFxWidth - 190, kFxBarY + 6, 176, 28});
 
         for(int r = 0; r < fxLib::RackCount; ++r)
@@ -2719,7 +2809,7 @@ namespace retromulator
 
         // instrument > modulation > delay > reverb > out, the racks that play lit
         const char* const stages[] = {"MTRX-1K", "MODULATION", "DELAY", "REVERB", "OUT"};
-        float x = static_cast<float>(kFxLeft + 250);
+        float x = static_cast<float>(kFxFlowX);
         const float cy = static_cast<float>(kFxBarY + kFxBarH / 2);
         g.setFont(sans(10.0f, true));
         for(int i = 0; i < 5; ++i)

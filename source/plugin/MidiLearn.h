@@ -44,13 +44,44 @@ namespace retromulator
         static constexpr int kDetuneTarget = 201;
         // mono or poly, a setting likewise: the lower half of the control's range is poly, the upper mono
         static constexpr int kMonoTarget = 202;
-        // The effects, settings likewise: per rack the controls of the type it plays (0-7) and its
-        // switch (9), then the switch of the chain. A control follows the type, not its name.
+        // The effects, settings likewise. Per rack the controls of the type it plays by their
+        // place, the first nine at 300 + 10 x rack + place, the later ones at 340 + 4 x rack +
+        // place - 9, and its switch at place 9 of the first set; then the switch of the chain
+        // and its mix. A control follows the type, not its name.
         static constexpr int kFxTargetFirst = 300;
         static constexpr int kFxTargetsPerRack = 10;
         static constexpr int kFxRackOnControl = 9;
         static constexpr int kFxChainTarget = kFxTargetFirst + 3 * kFxTargetsPerRack;
-        static bool isFxTarget(const int t) { return t >= kFxTargetFirst && t <= kFxChainTarget; }
+        static constexpr int kFxChainMixTarget = kFxChainTarget + 1;
+        static constexpr int kFxLaterFirst = 340;
+        static constexpr int kFxLaterPerRack = 4;
+        static constexpr int kFxTargetLast = kFxLaterFirst + 3 * kFxLaterPerRack - 1;
+        static bool isFxTarget(const int t) { return t >= kFxTargetFirst && t <= kFxTargetLast; }
+        static int fxControlTarget(const int rack, const int control)
+        {
+            return control < kFxRackOnControl ? kFxTargetFirst + rack * kFxTargetsPerRack + control
+                                              : kFxLaterFirst + rack * kFxLaterPerRack + control - kFxRackOnControl;
+        }
+        static int fxRackOnTarget(const int rack) { return kFxTargetFirst + rack * kFxTargetsPerRack + kFxRackOnControl; }
+        // the rack and place of a target of a rack, control -1 for its switch; false for the
+        // chain's own targets and for numbers that are no target
+        static bool fxRackControlOf(const int t, int& rack, int& control)
+        {
+            if(t >= kFxTargetFirst && t < kFxChainTarget)
+            {
+                rack = (t - kFxTargetFirst) / kFxTargetsPerRack;
+                const int place = (t - kFxTargetFirst) % kFxTargetsPerRack;
+                control = place == kFxRackOnControl ? -1 : place;
+                return true;
+            }
+            if(t >= kFxLaterFirst && t <= kFxTargetLast)
+            {
+                rack = (t - kFxLaterFirst) / kFxLaterPerRack;
+                control = kFxRackOnControl + (t - kFxLaterFirst) % kFxLaterPerRack;
+                return true;
+            }
+            return false;
+        }
         enum BusField { BusSource = 0, BusAmount = 1, BusDestination = 2 };
         static constexpr uint16_t kMaxLimit = 16383;
 

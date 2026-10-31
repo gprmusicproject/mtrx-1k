@@ -11,7 +11,7 @@ endif()
 project(Retromulator VERSION 1.0.0 LANGUAGES C CXX)
 
 # shown after the number in the About page; the file versions of Windows take numbers only
-set(MTRX_VERSION_SUFFIX " alpha")
+set(MTRX_VERSION_SUFFIX " alpha 2")
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 	set(CMAKE_BUILD_TYPE Release)

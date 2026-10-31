@@ -21,9 +21,9 @@
 ;   /DManualPdf=<file>    the user manual
 
 #define AppName      "MTRX-1K"
-#define AppVersion   "1.0.0 alpha"
+#define AppVersion   "1.0.0 alpha 2"
 #define AppNumber    "1.0.0"
-#define AppFileVersion "1.0.0-alpha"
+#define AppFileVersion "1.0.0-alpha2"
 #define Publisher    "GPR Music Project"
 #define ManualName   "MTRX-1K User Manual.pdf"
 #define NoteName     "Put your firmware here - read me.txt"
@@ -166,6 +166,7 @@ it.RemoveData=Vuoi rimuovere anche i tuoi mapping MIDI e i tuoi suoni personaliz
 Source: "{#BuildDir}\Standalone\MTRX-1K.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ManualPdf}"; DestDir: "{app}"; DestName: "{#ManualName}"; Flags: ignoreversion
 Source: "..\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "third_party_notices.txt"; DestDir: "{app}"; DestName: "Third-party notices.txt"; Flags: ignoreversion
 Source: "firmware_note.txt"; DestDir: "{app}"; DestName: "{#NoteName}"; Flags: ignoreversion
 #ifdef HaveBank
 Source: "..\{#BankName}"; DestDir: "{app}"; Flags: ignoreversion

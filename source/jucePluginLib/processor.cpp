@@ -717,7 +717,8 @@ namespace pluginLib
 
 		getPlugin().process(inputs, outputs, numSamples, bpm, ppqPos, isPlaying);
 
-		applyOutputGain(outputs, numSamples);
+		if(!appliesOutputGainItself())
+			applyOutputGain(outputs, numSamples);
 
 		m_midiOut.clear();
 		getPlugin().getMidiOut(m_midiOut);

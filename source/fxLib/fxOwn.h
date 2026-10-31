@@ -4,7 +4,9 @@
 
 namespace fxLib
 {
-	// The effects of the chain, all MTRX-1K's own.
+	// The effects of the chain, MTRX-1K's own but for the chorus, ported from Ultramaster
+	// KR-106 (GPL v3), and the shimmer, from Shimmer-Reverb (MIT) with the zita-rev1
+	// reverberator of the Faust library (fxZitaRev.h); see fxOwn.cpp.
 	class OwnEffect
 	{
 	public:
@@ -41,7 +43,7 @@ namespace fxLib
 	std::unique_ptr<OwnEffect> createRoom();
 	std::unique_ptr<OwnEffect> createPlate();
 	std::unique_ptr<OwnEffect> createSpring();
-	std::unique_ptr<OwnEffect> createCloud();
+	std::unique_ptr<OwnEffect> createShimmer();
 
 	// how much of the dry sound and of the effect a Mix control lets through: both at full
 	// level at the middle, the effect fading to the left, the dry sound to the right

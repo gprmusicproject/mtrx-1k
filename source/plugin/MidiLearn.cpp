@@ -392,12 +392,12 @@ namespace retromulator
             return "Mono / Poly";
         if(target == kFxChainTarget)
             return "FX Chain On";
-        if(isFxTarget(target))
+        if(target == kFxChainMixTarget)
+            return "FX Chain Mix";
+        if(int rack = 0, control = 0; fxRackControlOf(target, rack, control))
         {
             static const char* const racks[3] = {"Modulation", "Delay", "Reverb"};
-            const int i = target - kFxTargetFirst;
-            const int c = i % kFxTargetsPerRack;
-            return juce::String("FX ") + racks[i / kFxTargetsPerRack] + (c == kFxRackOnControl ? juce::String(" On") : " " + juce::String(c + 1));
+            return juce::String("FX ") + racks[rack] + (control < 0 ? juce::String(" On") : " " + juce::String(control + 1));
         }
         if(target >= kBusTargetFirst)
         {
