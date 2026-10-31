@@ -11,6 +11,12 @@ Ported from KR106Chorus.h and BBDFilter.h of Ultramaster KR-106 by kayrockscreen
 https://github.com/kayrockscreenprinting/ultramaster_kr106, GNU General Public License v3.
 
 
+The spring reverb
+-----------------
+After the SpringReverbEngine of Selector Spring Reverb by jennyrave-sys,
+https://github.com/jennyrave-sys/SELECTOR_SPRING_REVERB_VST, GNU General Public License v3.
+
+
 The shimmer reverb
 ------------------
 After Shimmer-Reverb by Danial Kooshki, https://github.com/Danial-k-f/Shimmer-Reverb

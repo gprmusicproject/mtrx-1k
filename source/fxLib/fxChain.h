@@ -100,7 +100,7 @@ namespace fxLib
 
 		// The settings as bytes 0-127, so that they fit a SysEx message; read returns false
 		// and changes nothing when the bytes are not settings. Settings of versions 5 (1.0.0
-		// alpha) and 6 are read too: what they lack takes its starting value.
+		// alpha) to 7 are read too: what they lack takes its starting value.
 		std::vector<uint8_t> write() const;
 		bool read(const uint8_t* _data, size_t _size);
 		bool read(const std::vector<uint8_t>& _data) { return read(_data.data(), _data.size()); }

@@ -41,7 +41,7 @@ namespace fxLib
 			{"Hall",    5, {{{"Decay", 0.5f, K, P}, {"Size", 0.6f, K, P}, {"Tone", 0.6f, K, P}, {"Predelay", 0.15f, K, P}, {"Mix", 0.3f, K, P}}}},
 			{"Room",    4, {{{"Decay", 0.4f, K, P}, {"Tone", 0.5f, K, P}, {"Position", 0.5f, K, P}, {"Mix", 0.3f, K, P}}}},
 			{"Plate",   4, {{{"Decay", 0.5f, K, P}, {"Tone", 0.6f, K, P}, {"Predelay", 0.0f, K, P}, {"Mix", 0.25f, K, P}}}},
-			{"Spring",  3, {{{"Dwell", 0.5f, K, P}, {"Tone", 0.5f, K, P}, {"Mixer", 0.3f, K, P}}}},
+			{"Spring",  6, {{{"Drive", 0.0f, K, P}, {"Decay", 0.5f, K, P}, {"Feedback", 0.0f, K, P}, {"Bass", 0.5f, K, B}, {"Treble", 0.5f, K, B}, {"Mix", 0.3f, K, P}}}},
 			// the starting values GPR Music Project chose: decay 7.3 s, low decay 3.9 s, damping
 			// 6 kHz, A and B both +12 at half level, feedback 76, the loop cut at 250 Hz and 6 kHz
 			{"Shimmer", 11, {{{"Decay", 0.9f, K, P}, {"Low Decay", 0.42f, K, P}, {"Tone", 4.5f / 10.5f, K, P},
@@ -65,9 +65,10 @@ namespace fxLib
 
 		// 14 bits of a value in two bytes of 7
 		uint16_t toBits(const float _v) { return static_cast<uint16_t>(std::lround(std::clamp(_v, 0.0f, 1.0f) * 16383.0f)); }
-		// 7: the shimmer of Shimmer-Reverb, with other controls; 6: the mix of the chain, the
+		// 8: the spring of Selector Spring Reverb, with other controls; 7: the shimmer of
+		// Shimmer-Reverb, with other controls; 6: the mix of the chain, the
 		// chorus with modes, the pitch and feedback of the shimmer; 5: the ensemble came; 4: the spring of 3 had other controls; 1 and 2 were partly others' effects
-		constexpr uint8_t StateVersion = 7;
+		constexpr uint8_t StateVersion = 8;
 		constexpr uint8_t OldestReadable = 5;
 
 		// how many controls a type had in a version of the settings
@@ -77,6 +78,8 @@ namespace fxLib
 				return 3;
 			if(_version == 5 && _rack == RackReverb && _type == VerbShimmer)
 				return 8;
+			if(_version < 8 && _rack == RackReverb && _type == VerbSpring)
+				return 3;
 			return typeInfo(_rack, _type).controlCount;
 		}
 
@@ -85,8 +88,8 @@ namespace fxLib
 		{
 			if(_version == 5 && _rack == RackModulation && _type == ModChorus)
 				return _control == 2 ? 1 : -1;    // rate and depth went, the mix stays
-			// of another shimmer only the mix, the last control, carries over
-			if(_version < 7 && _rack == RackReverb && _type == VerbShimmer)
+			// of another shimmer or spring only the mix, the last control, carries over
+			if((_version < 7 && _rack == RackReverb && _type == VerbShimmer) || (_version < 8 && _rack == RackReverb && _type == VerbSpring))
 				return _control == controlsIn(_version, _rack, _type) - 1 ? typeInfo(_rack, _type).controlCount - 1 : -1;
 			return _control;
 		}

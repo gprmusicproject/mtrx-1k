@@ -5,8 +5,9 @@
 namespace fxLib
 {
 	// The effects of the chain, MTRX-1K's own but for the chorus, ported from Ultramaster
-	// KR-106 (GPL v3), and the shimmer, from Shimmer-Reverb (MIT) with the zita-rev1
-	// reverberator of the Faust library (fxZitaRev.h); see fxOwn.cpp.
+	// KR-106 (GPL v3), the spring, from Selector Spring Reverb (GPL v3), and the shimmer,
+	// from Shimmer-Reverb (MIT) with the zita-rev1 reverberator of the Faust library
+	// (fxZitaRev.h); see fxOwn.cpp.
 	class OwnEffect
 	{
 	public:

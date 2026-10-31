@@ -1193,7 +1193,7 @@ namespace fxLib
 			static constexpr int Block = 256;
 			// The loop of the original gives back so little (the reverberator about a third, its
 			// grains about a third, the feedback at most 0.35) that the shimmer stays 25 to 35 dB
-			// under the sound: here the feedback reaches 0.7 and the layers are raised by 2.5, so
+			// under the sound: here the feedback reaches 0.7 and the layers are raised by 1.8, so
 			// that it is heard, and still dies away at every setting.
 			static constexpr float FeedbackMost = 0.7f;
 			static constexpr float Makeup = 1.8f;
@@ -1310,115 +1310,169 @@ namespace fxLib
 			double m_phase = 0.0;
 		};
 
-		// The tube spring reverb of 1963, as the Boss FRV-1 recreates it: a driver valve
-		// sends the signal into a long tank of three springs, a recovery valve brings it back,
-		// and the mixer adds it to the dry sound, which stays at full level. Dwell is how hard
-		// the driver hits the springs: louder, more saturated and longer. Each spring disperses
-		// a little, so a transient comes back with the splash and drip of the tank but the
-		// notes stay in tune; the tank passes neither deep bass nor the top.
-		// Controls: dwell, tone, mixer.
+		// The spring reverb of Selector Spring Reverb by jennyrave-sys
+		// (github.com/jennyrave-sys/SELECTOR_SPRING_REVERB_VST, GPL v3), its SpringReverbEngine
+		// without JUCE, one engine a side as there. A triple-spring tank: the signal, driven
+		// into a soft saturation, goes into three springs (delays of 29, 37 and 43 ms, the right
+		// side 1.5 % longer) that feed back on themselves through a low-pass each and wobble
+		// on slow LFOs, the right side in the other phase; their sum is dispersed by two
+		// allpasses, shaped by a bass and a treble shelf and freed of DC. Decay sets the
+		// feedback of the springs, Feedback adds more, past 90 % until they ring on by
+		// themselves. Unlike the original, what goes into a spring passes a soft limit, so that
+		// ringing on stays loud but bounded: there the loop could grow without end.
+		// Controls: drive (0 to +24 dB), decay (1.2 to 4 s), feedback, bass, treble (-12 to
+		// +12 dB each), mix.
 		class Spring final : public OwnEffect
 		{
 		public:
 			void prepare(const double _rate) override
 			{
 				m_rate = _rate;
-				for(int s = 0; s < Springs; ++s)
-					m_springs[s].line.resize(static_cast<size_t>(SpringMs[s] * _rate / 1000.0) + 8);
-				m_lowCutK = onePole(280.0, _rate);
-				m_dampK = onePole(6500.0, _rate);
-				m_smoothK = static_cast<float>(1.0 - std::exp(-1.0 / (0.03 * _rate)));
+				for(int ch = 0; ch < 2; ++ch)
+				{
+					auto& e = m_engines[static_cast<size_t>(ch)];
+					const double spread = ch == 1 ? 1.015 : 1.0;   // stereo width
+					for(int s = 0; s < Springs; ++s)
+					{
+						e.spring[s].resize(static_cast<size_t>(_rate * 0.15));
+						e.delay[s] = SpringSeconds[s] * spread * _rate;
+						e.damp[s] = static_cast<float>(std::exp(-TwoPi * DampHz[s] / _rate));
+						e.phaseStep[s] = TwoPi * LfoHz[s] / _rate;
+					}
+					e.ap[0].assign(static_cast<size_t>(_rate * 0.0050 * spread), 0.0f);
+					e.ap[1].assign(static_cast<size_t>(_rate * 0.0017 * spread), 0.0f);
+				}
 				clear();
 			}
 
 			void clear() override
 			{
-				for(auto& s : m_springs)
+				for(int ch = 0; ch < 2; ++ch)
 				{
-					s.line.clear();
-					s.x1.fill(0.0f);
-					s.y1.fill(0.0f);
-					s.damp = s.low = 0.0f;
+					auto& e = m_engines[static_cast<size_t>(ch)];
+					const double phase = ch == 1 ? Pi : 0.0;
+					for(int s = 0; s < Springs; ++s)
+					{
+						e.spring[s].clear();
+						e.lp[s] = 0.0f;
+						e.phase[s] = phase + 0.5 * s;
+					}
+					for(auto& a : e.ap)
+						std::fill(a.begin(), a.end(), 0.0f);
+					e.apPos.fill(0);
+					e.bass.clear();
+					e.treble.clear();
+					e.dcIn = e.dcOut = 0.0f;
 				}
-				m_tone.fill(0.0f);
-				m_smooth.fill(-1.0f);
 				played = false;
 			}
 
 			void process(const float* _inL, const float* _inR, float* _outL, float* _outR, const int _samples, const float* _v, double, double) override
 			{
-				for(int k = 0; k < 3; ++k)
-					if(m_smooth[k] < 0.0f)
-						m_smooth[k] = _v[k];
-				// the tank's own decay, longer the harder it is driven: 1.6 to 3.8 s
-				const double rt60 = (1.6 + 2.2 * static_cast<double>(_v[0])) * LoopLoss;
-				std::array<float, Springs> gain{};
-				for(int s = 0; s < Springs; ++s)
-					gain[s] = static_cast<float>(std::pow(10.0, -3.0 * (SpringMs[s] / 1000.0) / rt60));
-				const float toneK = onePole(1200.0 * std::pow(10.0, static_cast<double>(_v[1])), m_rate);   // 1.2 to 12 kHz
-
-				for(int n = 0; n < _samples; ++n)
+				const float drive = static_cast<float>(std::pow(10.0, 24.0 * _v[0] / 20.0));
+				// the feedback of the springs: decay 1.2 to 4 s maps to 0.80 to 0.98, the feedback adds up to 0.15
+				const float decaySeconds = 1.2f + 2.8f * _v[1];
+				const float feedback = std::min(1.05f, 0.80f + (decaySeconds - 1.2f) / 2.8f * 0.18f + 0.15f * _v[2]);
+				const float dry = dryShare(_v[5]), wet = wetShare(_v[5]);
+				const float* in[2] = {_inL, _inR};
+				float* out[2] = {_outL, _outR};
+				for(int ch = 0; ch < 2; ++ch)
 				{
-					for(int k = 0; k < 3; ++k)
-						m_smooth[k] += m_smoothK * (_v[k] - m_smooth[k]);
-					const float dwell = m_smooth[0];
-					const float mixer = m_smooth[2];
-
-					// the driver valve: more dwell, more level and more grit into the tank
-					const float drive = 1.0f + 5.0f * dwell;
-					const float send = std::tanh(0.5f * (_inL[n] + _inR[n]) * drive) * (0.25f + 0.5f * dwell);
-
-					std::array<float, Springs> y{};
-					for(int s = 0; s < Springs; ++s)
+					auto& e = m_engines[static_cast<size_t>(ch)];
+					e.bass.setShelf(false, 250.0, 24.0 * _v[3] - 12.0, m_rate);
+					e.treble.setShelf(true, 4000.0, 24.0 * _v[4] - 12.0, m_rate);
+					for(int i = 0; i < _samples; ++i)
 					{
-						auto& sp = m_springs[s];
-						float x = sp.line.read(SpringMs[s] * m_rate / 1000.0);
-						for(int i = 0; i < Stages; ++i)
+						const float x = in[ch][i];
+						const float driven = std::tanh(x * drive);
+						float sum = 0.0f;
+						for(int s = 0; s < Springs; ++s)
 						{
-							const float z = Dispersion * x + sp.x1[i] - Dispersion * sp.y1[i];
-							sp.x1[i] = x;
-							sp.y1[i] = z;
-							x = z;
+							const float wobble = static_cast<float>(std::sin(e.phase[s])) * LfoSamples[s];
+							e.phase[s] += e.phaseStep[s];
+							if(e.phase[s] >= TwoPi)
+								e.phase[s] -= TwoPi;
+							const float y = e.spring[s].read(std::max(1.0, e.delay[s] + wobble));
+							e.lp[s] = y * (1.0f - e.damp[s]) + e.lp[s] * e.damp[s];
+							e.spring[s].write(std::tanh(driven + e.lp[s] * feedback));
+							sum += y;
 						}
-						sp.damp += m_dampK * (x - sp.damp);
-						sp.low += m_lowCutK * (sp.damp - sp.low);
-						y[s] = sp.damp - sp.low;
-						sp.line.write(send + gain[s] * y[s]);
+						float w = sum * 0.4f;
+						for(int a = 0; a < 2; ++a)
+						{
+							auto& buf = e.ap[static_cast<size_t>(a)];
+							auto& pos = e.apPos[static_cast<size_t>(a)];
+							const float held = buf[static_cast<size_t>(pos)];
+							buf[static_cast<size_t>(pos)] = w + held * 0.6f + 1.0e-18f;
+							w = held - w;
+							if(++pos >= static_cast<int>(buf.size()))
+								pos = 0;
+						}
+						w = e.treble.process(e.bass.process(w));
+						const float dc = w - e.dcIn + 0.995f * e.dcOut;
+						e.dcIn = w;
+						e.dcOut = dc;
+						// the output clipper of the original
+						w = dc > 1.5f ? 1.5f + std::tanh(dc - 1.5f) : dc < -1.5f ? -1.5f + std::tanh(dc + 1.5f) : dc;
+						out[ch][i] = dry * x + wet * w;
 					}
-
-					// the recovery valve, then the tone of the return; the third spring between the sides
-					const std::array<float, 2> back = {y[0] + 0.6f * y[2], y[1] + 0.6f * y[2]};
-					float out[2];
-					const float in[2] = {_inL[n], _inR[n]};
-					for(int ch = 0; ch < 2; ++ch)
-					{
-						const float wet = std::tanh(1.5f * back[ch]) / 1.5f;
-						m_tone[ch] += toneK * (wet - m_tone[ch]);
-						out[ch] = in[ch] + 2.0f * mixer * m_tone[ch];
-					}
-					_outL[n] = out[0];
-					_outR[n] = out[1];
 				}
 			}
 
 		private:
-			static constexpr int Springs = 3;
-			static constexpr int Stages = 10;
-			static constexpr float Dispersion = 0.45f;
-			static constexpr double SpringMs[Springs] = {33.7, 38.1, 41.9};
-			// the filters of the loop take their share of the decay
-			static constexpr double LoopLoss = 1.5;
-			struct SpringState
+			// a shelf of the RBJ cookbook, Q 0.707, as the original's
+			struct Shelf
 			{
-				Line line;
-				std::array<float, Stages> x1{}, y1{};
-				float damp = 0.0f, low = 0.0f;
+				float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
+				float x1 = 0.0f, x2 = 0.0f, y1 = 0.0f, y2 = 0.0f;
+
+				void setShelf(const bool _high, const double _hz, const double _db, const double _rate)
+				{
+					const double a = std::pow(10.0, _db / 40.0);
+					const double w0 = TwoPi * _hz / _rate, c = std::cos(w0), s = std::sin(w0);
+					const double alpha = s / 2.0 * std::sqrt((a + 1.0 / a) * (1.0 / 0.707 - 1.0) + 2.0);
+					const double beta = 2.0 * std::sqrt(a) * alpha;
+					double nb0, nb1, nb2, na0, na1, na2;
+					if(!_high)
+					{
+						nb0 = a * ((a + 1) - (a - 1) * c + beta); nb1 = 2 * a * ((a - 1) - (a + 1) * c); nb2 = a * ((a + 1) - (a - 1) * c - beta);
+						na0 = (a + 1) + (a - 1) * c + beta;       na1 = -2 * ((a - 1) + (a + 1) * c);   na2 = (a + 1) + (a - 1) * c - beta;
+					}
+					else
+					{
+						nb0 = a * ((a + 1) + (a - 1) * c + beta); nb1 = -2 * a * ((a - 1) + (a + 1) * c); nb2 = a * ((a + 1) + (a - 1) * c - beta);
+						na0 = (a + 1) - (a - 1) * c + beta;       na1 = 2 * ((a - 1) - (a + 1) * c);     na2 = (a + 1) - (a - 1) * c - beta;
+					}
+					b0 = static_cast<float>(nb0 / na0); b1 = static_cast<float>(nb1 / na0); b2 = static_cast<float>(nb2 / na0);
+					a1 = static_cast<float>(na1 / na0); a2 = static_cast<float>(na2 / na0);
+				}
+				void clear() { x1 = x2 = y1 = y2 = 0.0f; }
+				float process(const float _x)
+				{
+					const float y = b0 * _x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+					x2 = x1; x1 = _x; y2 = y1; y1 = y;
+					return y;
+				}
+			};
+
+			static constexpr int Springs = 3;
+			static constexpr double SpringSeconds[Springs] = {0.029, 0.037, 0.043};
+			static constexpr double DampHz[Springs] = {4500.0, 4100.0, 3800.0};
+			static constexpr double LfoHz[Springs] = {1.5, 2.2, 0.8};
+			static constexpr float LfoSamples[Springs] = {8.0f, 6.0f, 10.0f};
+
+			struct Engine
+			{
+				std::array<Line, Springs> spring;
+				std::array<double, Springs> delay{}, phase{}, phaseStep{};
+				std::array<float, Springs> damp{}, lp{};
+				std::array<std::vector<float>, 2> ap;
+				std::array<int, 2> apPos{};
+				Shelf bass, treble;
+				float dcIn = 0.0f, dcOut = 0.0f;
 			};
 			double m_rate = 48000.0;
-			std::array<SpringState, Springs> m_springs;
-			std::array<float, 2> m_tone{};
-			std::array<float, 3> m_smooth{-1.0f, -1.0f, -1.0f};
-			float m_lowCutK = 0.02f, m_dampK = 0.3f, m_smoothK = 0.001f;
+			std::array<Engine, 2> m_engines;
 		};
 	}
 

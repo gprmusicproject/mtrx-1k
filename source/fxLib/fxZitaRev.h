@@ -4,8 +4,8 @@
 // (demos.lib zita_rev1, an 8x8 feedback delay network with Schroeder allpass combs),
 // generated with Faust 2.81.2, taken from Shimmer-Reverb by Danial Kooshki
 // (github.com/Danial-k-f/Shimmer-Reverb, MIT licence). Only the user section of the generated
-// file is here: the Faust architecture around it, its metadata and its user interface are
-// left out, and the class stands alone.
+// file is here: the Faust architecture around it, its metadata, its user interface and the
+// setters MTRX-1K does not use are left out, and the class stands alone.
 //
 // author: Julius O. Smith III, Christopher Arndt
 // Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
@@ -48,15 +48,6 @@ static float ZitaRev_faustpower2_f(float value) {
 }
 
 class ZitaRev {
-	
-
-
-	
-
-	// ==== Other Faust-generated methods ====
-	/*void init(int sample_rate) { ... }
-	void compute(int count, FAUSTFLOAT** inputs, FAUSTFLOAT** outputs) { ... }*/
-
  private:
 	
 	FAUSTFLOAT fVslider0;
@@ -179,25 +170,13 @@ class ZitaRev {
 	ZitaRev() {
 	}
 	
-	// ==== Setters for JUCE parameters ====
+	// ==== Setters of the parameters MTRX-1K uses ====
 	void setDecay(float value) { fVslider4 = value; }
 	void setLowRT60(float value) { fVslider7 = value; }
 	void setHFDamping(float value) { fVslider5 = value; }
-	void setLFx(float value) { fVslider6 = value; }
-	void setPreDelay(float value) { fVslider8 = value; }
-	void setEQ1(float freq, float gain) { fVslider3 = freq; fVslider2 = gain; }
-	void setEQ2(float freq, float gain) { fVslider1 = freq; fVslider0 = gain; }
 	void setWetDry(float value) { fVslider9 = value; }
 	void setOutputLevel(float value) { fVslider10 = value; }
 
-
-
-	int getNumInputs() {
-		return 2;
-	}
-	int getNumOutputs() {
-		return 2;
-	}
 	
 	static void classInit(int sample_rate) {
 	}
@@ -449,10 +428,6 @@ class ZitaRev {
 		instanceClear();
 	}
 	
-	
-	int getSampleRate() {
-		return fSampleRate;
-	}
 	
 	
 	void compute(int count, FAUSTFLOAT** RESTRICT inputs, FAUSTFLOAT** RESTRICT outputs) {
