@@ -79,9 +79,12 @@ namespace retromulator
         AboutPanel          m_about;
         // Shown while the core starts for the first time.
         StartProgressPanel  m_startProgress;
-        // Open the patch editor under the panel, or the effects in its place.
+        // Open the patch editor under the panel, or the effects or the presets in its place.
         juce::TextButton    m_editBtn { "Edit" };
         juce::TextButton    m_fxBtn { "FX" };
+        LibraryButton       m_listBtn { "Presets" };
+        // Marks the loaded patch as a favourite, or not.
+        juce::TextButton    m_starBtn;
         EditPanel           m_editPanel;
         rackPanel::Theme    m_theme = rackPanel::Theme::Black;
 
@@ -130,6 +133,16 @@ namespace retromulator
         void showMatrixLfoSyncMenu(int lfo);
         void updateMatrixLfoSyncItems();
         void navigatePatch(int delta);
+        // < > with a filter on the presets: the next patch it lets through, in this bank or
+        // the next ones.
+        void navigateFiltered(int delta);
+        // A program of the loaded bank as the PATCH selector lists it: number, name, and a star
+        // before a favourite.
+        juce::String programItemText(int index, const juce::String& name) const;
+        // what the PATCH selector was last filled from
+        uint32_t m_presetRevision = 0;
+        presets::Filter m_shownFilter;
+        int m_shownProgram = -1;
         void navigateBankFolder(int delta);
         // Boots a core in the background, or switches the unit off with SynthType::None.
         void startCore(SynthType type);
@@ -138,7 +151,9 @@ namespace retromulator
         void openManual();
         void setTheme(rackPanel::Theme theme);
         // the panel under the unit, open or closed, with the patch or the effects
-        void setPanelOpen(bool open, bool effects);
+        void setPanelOpen(bool open, EditPanel::Page page);
+        // the page the processor keeps open
+        EditPanel::Page keptPage() const;
 
         void refreshPanel();
         void onPanelDigit(int digit);

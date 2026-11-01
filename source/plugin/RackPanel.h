@@ -27,12 +27,14 @@ namespace retromulator
         static constexpr int kStripControlY = kUnitHeight + 23;
         static constexpr int kStripControlH = 26;
         static constexpr int kStripEditX    = 16;
-        static constexpr int kStripEditW    = 100;   // Edit and FX
-        static constexpr int kStripBankX    = 128;
+        static constexpr int kStripEditW    = 140;   // Edit, FX and the presets
+        static constexpr int kStripBankX    = 166;
         static constexpr int kStripBankW    = 276;
-        static constexpr int kStripNavX     = 420;
-        static constexpr int kStripPatchX   = 480;
-        static constexpr int kStripPatchW   = 516;
+        static constexpr int kStripNavX     = 452;
+        static constexpr int kStripPatchX   = 512;
+        static constexpr int kStripPatchW   = 418;
+        static constexpr int kStripStarX    = kStripPatchX + kStripPatchW + 6;   // the favourite key
+        static constexpr int kStripStarW    = 26;
 
         // About legend, in the top right corner between the case screw and the rack ear
         static constexpr int kAboutX        = 1037;
@@ -113,6 +115,17 @@ namespace retromulator
     {
     public:
         ThemeSwitch();
+
+    private:
+        void paintButton(juce::Graphics& g, bool highlighted, bool down) override;
+    };
+
+    // A key of the strip that shows a shelf of books, three upright and one leaning, instead
+    // of its text: the presets. The text stays its name for screen readers.
+    class LibraryButton final : public juce::TextButton
+    {
+    public:
+        explicit LibraryButton(const juce::String& name) : juce::TextButton(name) {}
 
     private:
         void paintButton(juce::Graphics& g, bool highlighted, bool down) override;

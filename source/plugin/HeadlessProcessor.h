@@ -5,6 +5,7 @@
 #include "jucePluginLib/processor.h"
 #include "synthLib/midiTypes.h"
 #include "fxLib/fxChain.h"
+#include "PresetLibrary.h"
 #ifndef CUSTOM
 #  include "synthLib/deviceTypes.h"
 #endif
@@ -343,12 +344,13 @@ namespace retromulator
 
         // ── Matrix polyphony ───────────────────────────────────────────────
         // 6, 12 or 24 voices: one, two or four instruments with the same firmware, see
-        // matrixLib::Device::setVoiceCount. A setting of this instance, saved with it.
+        // matrixLib::Device::setVoiceCount. A global setting, in settings.xml: a change
+        // reaches every open instance and the next ones, and no patch or session sets it.
         int  getMatrixVoices() const { return m_matrixVoices; }
         void setMatrixVoices(int voices);
-        // Stereo spread of the voices, 0-100 %, see matrixLib::Device::setSpread. Like the
-        // voices a setting of the instance, saved with it, and with a patch saved from the
-        // editor (see kMatrixExtras in the .cpp).
+        // Stereo spread of the voices, 0-100 %, see matrixLib::Device::setSpread. A setting
+        // of the instance, saved with it, and with a patch saved from the editor (see
+        // kMatrixExtras in the .cpp).
         int  getMatrixSpread() const { return m_matrixSpread.load(); }
         void setMatrixSpread(int percent);
         // from a control of the player's keyboard through the MIDI learn: value out of max
@@ -379,6 +381,14 @@ namespace retromulator
         // Bank files a patch can be saved into: the RAM bank first, then every other bank
         // that is not one of the ROM banks.
         static std::vector<std::string> getMatrixWritableBanks();
+        // Every bank file, in the order of the BANK selector.
+        static std::vector<std::string> getMatrixBankFiles();
+        // The name of the loaded bank, as presets::Library knows a bank: its file name.
+        std::string getMatrixBankName() const;
+        // Category and favourite of a program of the loaded bank, and whether the filter lets it through.
+        presets::Category getProgramCategory(int program) const;
+        bool isProgramFavourite(int program) const;
+        bool isProgramShown(int program) const;
         // Patch names of a bank file, one per position. The RAM bank always has all 200.
         static std::vector<std::string> getMatrixBankPatchNames(const std::string& bankPath);
 
@@ -506,6 +516,12 @@ namespace retromulator
         bool m_editPanelOpen = false;
         // and shows the effects instead of the patch
         bool m_fxPageOpen = false;
+        // or the presets
+        bool m_presetPageOpen = false;
+        // What the presets page, the PATCH selector and the < > keys show; the page looks in the
+        // loaded bank or in every bank. Kept with the session.
+        presets::Filter m_presetFilter;
+        bool m_presetAllBanks = false;
 
         // Finish of the GPL editor's panel, shared by every instance.
         static bool isWhitePanel();
@@ -642,6 +658,7 @@ namespace retromulator
         int                  m_matrixLfoSync[2] = {0, 0};
         void applyMatrixLfoSync();
         int                  m_matrixVoices = 6;
+        void adoptMatrixVoices(int voices);
         void applyMatrixVoices();
         std::atomic<int>     m_matrixSpread{0};
         std::atomic<int>     m_matrixDetune{0};
@@ -654,8 +671,9 @@ namespace retromulator
 
         // Voices, spread, detune and mono kept with a patch: a message of our own right after
         // the patch in the bank file. One entry per program of the loaded bank. A patch without
-        // them, the factory patches among them, has those of the instrument: 6 voices, no
-        // spread, no detune, mono as its keyboard mode says.
+        // them, the factory patches among them, has those of the instrument: no spread, no
+        // detune, mono as its keyboard mode says. The voices are read and no longer used: they
+        // are a global setting since 1.0.0 alpha 4.
         struct MatrixPatchExtras
         {
             bool present = false;
@@ -668,7 +686,6 @@ namespace retromulator
         std::vector<MatrixPatchExtras> m_matrixExtras;
         MatrixPatchExtras matrixExtrasOf(int index) const;
         // what the loaded program has, to light Edited when the settings differ from it
-        int  m_matrixRefVoices = 6;
         int  m_matrixRefSpread = 0;
         int  m_matrixRefDetune = 0;
         int  m_matrixRefMono = -1;

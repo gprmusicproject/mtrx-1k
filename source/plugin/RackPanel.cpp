@@ -503,6 +503,30 @@ namespace retromulator
             g.fillRect(lever.getCentreX() + dx - 0.4f, lever.getY() + 1.5f, 0.8f, lever.getHeight() - 3.0f);
     }
 
+    void LibraryButton::paintButton(juce::Graphics& g, const bool highlighted, const bool down)
+    {
+        const bool on = getToggleState();
+        getLookAndFeel().drawButtonBackground(g, *this, findColour(on ? buttonOnColourId : buttonColourId), highlighted, down);
+
+        // three books upright and a fourth leaning on them, centred in the key
+        const auto r = getLocalBounds().toFloat();
+        const float s = r.getHeight() * 0.56f;            // the height of a book
+        const float w = s * 0.15f, gap = s * 0.11f, lean = 0.42f;
+        const float total = 3.0f * w + 3.0f * gap + w + s * std::sin(lean);
+        const float x0 = r.getCentreX() - total * 0.5f, bottom = r.getCentreY() + s * 0.5f;
+        juce::Path books;
+        for(int i = 0; i < 3; ++i)
+            books.addRoundedRectangle(x0 + static_cast<float>(i) * (w + gap), bottom - s, w, s, w * 0.25f);
+        juce::Path leaning;
+        const float lx = x0 + 3.0f * (w + gap);
+        leaning.addRoundedRectangle(lx, bottom - s, w, s, w * 0.25f);
+        leaning.applyTransform(juce::AffineTransform::rotation(lean, lx, bottom));
+        books.addPath(leaning);
+
+        g.setColour(findColour(on ? textColourOnId : textColourOffId).withMultipliedAlpha(isEnabled() ? 1.0f : 0.5f));
+        g.fillPath(books);
+    }
+
     VolumeKnob::VolumeKnob()
     {
         setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);

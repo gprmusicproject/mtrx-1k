@@ -331,14 +331,32 @@ namespace retromulator
         m_editBtn.setClickingTogglesState(true);
         m_editBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff1f5fb0));
         m_editBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
-        m_editBtn.onClick = [this] { setPanelOpen(m_editBtn.getToggleState(), false); };
+        m_editBtn.onClick = [this] { setPanelOpen(m_editBtn.getToggleState(), EditPanel::Page::Patch); };
         m_canvas.addAndMakeVisible(m_editBtn);
         m_fxBtn.setClickingTogglesState(true);
         m_fxBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff1f5fb0));
         m_fxBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
         m_fxBtn.setTooltip("Effects");
-        m_fxBtn.onClick = [this] { setPanelOpen(m_fxBtn.getToggleState(), true); };
+        m_fxBtn.onClick = [this] { setPanelOpen(m_fxBtn.getToggleState(), EditPanel::Page::Effects); };
         m_canvas.addAndMakeVisible(m_fxBtn);
+        m_listBtn.setClickingTogglesState(true);
+        m_listBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff1f5fb0));
+        m_listBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+        m_listBtn.setTooltip("Presets: search, favourites and categories");
+        m_listBtn.onClick = [this] { setPanelOpen(m_listBtn.getToggleState(), EditPanel::Page::Presets); };
+        m_canvas.addAndMakeVisible(m_listBtn);
+        m_starBtn.setTitle("Favourite");
+        m_starBtn.setTooltip("Favourite");
+        m_starBtn.onClick = [this]
+        {
+            const int program = m_proc.getCurrentProgram();
+            if(m_proc.getSynthType() != SynthType::Matrix || program < 0 || program >= static_cast<int>(m_proc.getProgramNames().size()))
+                return;
+            presets::Library::instance().setFavourite(m_proc.getMatrixBankName(), program, m_proc.getProgramNames()[static_cast<size_t>(program)],
+                                                      !m_proc.isProgramFavourite(program));
+            updateStatus();
+        };
+        m_canvas.addAndMakeVisible(m_starBtn);
         m_editPanel.onProgramChanged = [this] { updateStatus(); };
         m_editPanel.setTheme(m_theme);
         m_canvas.addChildComponent(m_editPanel);
@@ -351,7 +369,7 @@ namespace retromulator
         startTimerHz(kPanelTimerHz);
 
         if(m_proc.m_editPanelOpen)
-            setPanelOpen(true, m_proc.m_fxPageOpen);
+            setPanelOpen(true, keptPage());
 
         // The unit powers up as a Matrix-1000. Only the first editor of an instance does
         // this, so one that was switched off stays off when its window is reopened.
@@ -449,14 +467,16 @@ namespace retromulator
         m_manualBtn .setBounds(kAboutX, kManualY, kAboutW, kAboutH);
         m_about     .setBounds(0, 0, kWidth, kHeight);
         m_startProgress.setBounds(0, 0, kWidth, kHeight);
-        m_editBtn   .setBounds(kStripEditX, y, kStripEditW - 48, h);
-        m_fxBtn     .setBounds(kStripEditX + kStripEditW - 44, y, 44, h);
+        m_editBtn   .setBounds(kStripEditX, y, 50, h);
+        m_fxBtn     .setBounds(kStripEditX + 54, y, 40, h);
+        m_listBtn   .setBounds(kStripEditX + kStripEditW - 42, y, 42, h);
+        m_starBtn   .setBounds(kStripStarX, y, kStripStarW, h);
         m_editPanel .setBounds(0, kHeight, kWidth, EditPanel::kHeight);
         m_bankCombo .setBounds(kStripBankX, y, kStripBankW, h);
         m_prevBtn   .setBounds(kStripNavX, y, 24, h);
         m_nextBtn   .setBounds(kStripNavX + 26, y, 24, h);
         m_progCombo .setBounds(kStripPatchX, y, kStripPatchW, h);
-        m_statusLabel.setBounds(kStripPatchX + kStripPatchW + 6, y, kWidth - (kStripPatchX + kStripPatchW + 6) - 8, h);
+        m_statusLabel.setBounds(kStripStarX + kStripStarW + 4, y, kWidth - (kStripStarX + kStripStarW + 4) - 8, h);
     }
 
     void BasicEditor::refreshBankCombo()
@@ -707,18 +727,36 @@ namespace retromulator
             const int progIdx   = m_proc.getCurrentProgram();
             const auto& names   = m_proc.getProgramNames();
 
-            if(bankChanged || m_progCombo.getNumItems() != progCount)
+            // Matrix: a filter on the presets leaves out what it does not let through, but for
+            // the patch that is loaded; a favourite has a star
+            const bool matrix = type == SynthType::Matrix;
+            const auto revision = presets::Library::instance().getRevision();
+            const auto& filter = m_proc.m_presetFilter;
+            const bool presetsChanged = matrix && (revision != m_presetRevision || filter.category != m_shownFilter.category
+                                                   || filter.favourites != m_shownFilter.favourites || (filter.active() && progIdx != m_shownProgram));
+            m_presetRevision = revision;
+            m_shownFilter = filter;
+            m_shownProgram = progIdx;
+            const bool countWrong = !(matrix && filter.active()) && m_progCombo.getNumItems() != progCount;
+            if(bankChanged || presetsChanged || countWrong)
             {
                 m_progCombo.clear(juce::dontSendNotification);
                 for(int i = 0; i < progCount; ++i)
                 {
-                    const juce::String num = juce::String(patchDisplayNumber(i)).paddedLeft('0', 3);
-                    const juce::String name = (i < static_cast<int>(names.size()) && !names[static_cast<size_t>(i)].empty())
-                        ? (num + "  " + juce::String(names[static_cast<size_t>(i)]))
-                        : num;
-                    m_progCombo.addItem(name, i + 1);
+                    if(matrix && i != progIdx && !m_proc.isProgramShown(i))
+                        continue;
+                    const juce::String name = i < static_cast<int>(names.size()) ? juce::String(names[static_cast<size_t>(i)]) : juce::String();
+                    m_progCombo.addItem(programItemText(i, name), i + 1);
                 }
             }
+            if(matrix)
+            {
+                const bool favourite = m_proc.isProgramFavourite(progIdx);
+                m_starBtn.setButtonText(juce::String::charToString(favourite ? juce::juce_wchar(0x2605) : juce::juce_wchar(0x2606)));
+                m_starBtn.setColour(juce::TextButton::textColourOffId, favourite ? juce::Colour(0xffffc23a) : juce::Colour(0xffb9bbc0));
+                m_starBtn.setEnabled(progIdx >= 0 && progCount > 0);
+            }
+            m_starBtn.setVisible(matrix);
 
             // Update current item text (name may have been set after initial load via sendBankMessage).
             // Skip for Akai — program names are already set correctly by loadSoundFile.
@@ -730,8 +768,7 @@ namespace retromulator
                     ? juce::String{}
                     : juce::File(currentPath).getFileNameWithoutExtension();
                 const bool hasPatchName = !patch.isEmpty() && patch != bankStr;
-                const juce::String num = juce::String(patchDisplayNumber(progIdx)).paddedLeft('0', 3);
-                m_progCombo.changeItemText(progIdx + 1, hasPatchName ? (num + "  " + patch) : num);
+                m_progCombo.changeItemText(progIdx + 1, programItemText(progIdx, hasPatchName ? patch : juce::String()));
             }
 
             m_progCombo.setSelectedId(0,           juce::dontSendNotification);
@@ -966,10 +1003,61 @@ namespace retromulator
             });
     }
 
+    void BasicEditor::navigateFiltered(const int delta)
+    {
+        // in the loaded bank first
+        const int count = m_proc.getProgramCount();
+        for(int i = m_proc.getCurrentProgram() + delta; i >= 0 && i < count; i += delta)
+        {
+            if(m_proc.isProgramShown(i))
+            {
+                m_proc.selectProgram(i);
+                updateStatus();
+                return;
+            }
+        }
+        if(m_bankLock)
+            return;
+
+        // then the banks after it, round to the loaded one: the first patch the filter lets through
+        const auto banks = HeadlessProcessor::getMatrixBankFiles();
+        const int n = static_cast<int>(banks.size());
+        const juce::String currentPath(normalisePath(m_proc.getSysexFilePath()));
+        int current = 0;
+        for(int b = 0; b < n; ++b)
+            if(juce::String(banks[static_cast<size_t>(b)]) == currentPath)
+                current = b;
+        auto& library = presets::Library::instance();
+        const auto& filter = m_proc.m_presetFilter;
+        for(int step = 1; step <= n; ++step)
+        {
+            const auto& path = banks[static_cast<size_t>(((current + delta * step) % n + n) % n)];
+            const auto bank = juce::File(path).getFileNameWithoutExtension().toStdString();
+            const auto names = HeadlessProcessor::getMatrixBankPatchNames(path);
+            const int size = static_cast<int>(names.size());
+            for(int k = 0; k < size; ++k)
+            {
+                const int slot = delta > 0 ? k : size - 1 - k;
+                const auto& name = names[static_cast<size_t>(slot)];
+                if(filter.matches(library.category(bank, slot, name), library.isFavourite(bank, slot, name)))
+                {
+                    m_proc.loadPresetFromFile(path, bank, slot);
+                    updateStatus();
+                    return;
+                }
+            }
+        }
+    }
+
     void BasicEditor::navigatePatch(int delta)
     {
         const auto type = m_proc.getSynthType();
         if(type == SynthType::None) return;
+        if(type == SynthType::Matrix && m_proc.m_presetFilter.active())
+        {
+            navigateFiltered(delta);
+            return;
+        }
 
         const juce::File synthFolder(HeadlessProcessor::getSynthDataFolder(type));
 
@@ -1324,9 +1412,8 @@ namespace retromulator
             // another instance may have saved into the bank that is loaded here
             m_proc.refreshMatrixBankFromDisk();
             // a session restored while the window is open brings its own setting
-            if(m_proc.m_editPanelOpen != m_editPanel.isVisible()
-               || m_proc.m_fxPageOpen != (m_editPanel.getPage() == EditPanel::Page::Effects))
-                setPanelOpen(m_proc.m_editPanelOpen, m_proc.m_fxPageOpen);
+            if(m_proc.m_editPanelOpen != m_editPanel.isVisible() || keptPage() != m_editPanel.getPage())
+                setPanelOpen(m_proc.m_editPanelOpen, keptPage());
             updateStatus();
         }
         else
@@ -1492,6 +1579,13 @@ namespace retromulator
         return fallback;
     }
 
+    juce::String BasicEditor::programItemText(const int index, const juce::String& name) const
+    {
+        const juce::String num = juce::String(patchDisplayNumber(index)).paddedLeft('0', 3);
+        const bool favourite = m_proc.getSynthType() == SynthType::Matrix && m_proc.isProgramFavourite(index);
+        return (favourite ? juce::String::charToString(juce::juce_wchar(0x2605)) + " " : juce::String()) + (name.isEmpty() ? num : num + "  " + name);
+    }
+
     int BasicEditor::patchDisplayNumber(int index) const
     {
         if(m_proc.getSynthType() == SynthType::Matrix)
@@ -1623,14 +1717,23 @@ namespace retromulator
         refreshPanel();
     }
 
-    void BasicEditor::setPanelOpen(const bool open, const bool effects)
+    EditPanel::Page BasicEditor::keptPage() const
+    {
+        return m_proc.m_presetPageOpen ? EditPanel::Page::Presets : m_proc.m_fxPageOpen ? EditPanel::Page::Effects : EditPanel::Page::Patch;
+    }
+
+    void BasicEditor::setPanelOpen(const bool open, const EditPanel::Page page)
     {
         m_proc.m_editPanelOpen = open;
         if(open)
-            m_proc.m_fxPageOpen = effects;
-        m_editBtn.setToggleState(open && !effects, juce::dontSendNotification);
-        m_fxBtn.setToggleState(open && effects, juce::dontSendNotification);
-        m_editPanel.setPage(m_proc.m_fxPageOpen ? EditPanel::Page::Effects : EditPanel::Page::Patch);
+        {
+            m_proc.m_fxPageOpen = page == EditPanel::Page::Effects;
+            m_proc.m_presetPageOpen = page == EditPanel::Page::Presets;
+        }
+        m_editBtn.setToggleState(open && page == EditPanel::Page::Patch, juce::dontSendNotification);
+        m_fxBtn.setToggleState(open && page == EditPanel::Page::Effects, juce::dontSendNotification);
+        m_listBtn.setToggleState(open && page == EditPanel::Page::Presets, juce::dontSendNotification);
+        m_editPanel.setPage(keptPage());
         const bool resize = open != m_editPanel.isVisible();
         m_editPanel.setVisible(open);
         if(open)

@@ -11,7 +11,7 @@ endif()
 project(Retromulator VERSION 1.0.0 LANGUAGES C CXX)
 
 # shown after the number in the About page; the file versions of Windows take numbers only
-set(MTRX_VERSION_SUFFIX " alpha 3")
+set(MTRX_VERSION_SUFFIX " alpha 4")
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 	set(CMAKE_BUILD_TYPE Release)
@@ -77,7 +77,7 @@ juce_add_plugin(Retromulator
 juce_add_binary_data(RetromulatorData SOURCES ${RETROMULATOR_RESOURCES})
 
 # Rack panel and patch editor of the GPL editor, not listed in the .jucer
-target_sources(Retromulator PRIVATE ${RETROMULATOR_SOURCES} source/plugin/RackPanel.cpp source/plugin/EditPanel.cpp source/plugin/MidiLearn.cpp)
+target_sources(Retromulator PRIVATE ${RETROMULATOR_SOURCES} source/plugin/RackPanel.cpp source/plugin/EditPanel.cpp source/plugin/MidiLearn.cpp source/plugin/PresetLibrary.cpp)
 
 # The effects after the instrument, all MTRX-1K's own
 target_sources(Retromulator PRIVATE source/fxLib/fxChain.cpp source/fxLib/fxOwn.cpp)

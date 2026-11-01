@@ -21,9 +21,9 @@
 ;   /DManualPdf=<file>    the user manual
 
 #define AppName      "MTRX-1K"
-#define AppVersion   "1.0.0 alpha 3"
+#define AppVersion   "1.0.0 alpha 4"
 #define AppNumber    "1.0.0"
-#define AppFileVersion "1.0.0-alpha3"
+#define AppFileVersion "1.0.0-alpha4"
 #define Publisher    "GPR Music Project"
 #define ManualName   "MTRX-1K User Manual.pdf"
 #define NoteName     "Put your firmware here - read me.txt"
@@ -144,7 +144,7 @@ en.MenuUninstall=Uninstall MTRX-1K
 en.InUse=MTRX-1K is in use. Close the standalone app and your host, then start Setup again.%n%nFile in use:%n%1
 en.InUseUninstall=MTRX-1K is in use. Close the standalone app and your host, then start the removal again.%n%nFile in use:%n%1
 en.OldCopy=Another copy of the plug-in was found in%n%1%n%nA host must not find two copies of MTRX-1K. Remove that copy now?
-en.RemoveData=Do you also want to remove your MIDI mappings and your own sounds?%n%nYes: the folders MIDI and Patch in%n%1%nare deleted, with your MIDI profiles, your banks and the patches you saved. This cannot be undone.%n%nNo: they are kept for a later installation.%n%nThe firmware files in the folder ROM are kept in both cases.
+en.RemoveData=Do you also want to remove your MIDI mappings and your own sounds?%n%nYes: the folders MIDI and Patch in%n%1%nare deleted, with your MIDI profiles, your banks and the patches you saved, and your favourites. This cannot be undone.%n%nNo: they are kept for a later installation.%n%nThe firmware files in the folder ROM are kept in both cases.
 it.ReadyApp=Applicazione standalone e manuale utente
 it.ReadyVst3=Plug-in VST3
 #ifdef HaveBank
@@ -160,7 +160,7 @@ it.MenuUninstall=Disinstalla MTRX-1K
 it.InUse=MTRX-1K è in uso. Chiudi l'applicazione standalone e il tuo host, poi avvia di nuovo il Setup.%n%nFile in uso:%n%1
 it.InUseUninstall=MTRX-1K è in uso. Chiudi l'applicazione standalone e il tuo host, poi avvia di nuovo la rimozione.%n%nFile in uso:%n%1
 it.OldCopy=È stata trovata un'altra copia del plug-in in%n%1%n%nUn host non deve trovare due copie di MTRX-1K. Rimuovere ora quella copia?
-it.RemoveData=Vuoi rimuovere anche i tuoi mapping MIDI e i tuoi suoni personalizzati?%n%nSì: le cartelle MIDI e Patch in%n%1%nvengono cancellate, con i profili MIDI, i banchi e le patch che hai salvato. L'operazione non si può annullare.%n%nNo: restano per una prossima installazione.%n%nI file del firmware nella cartella ROM restano in entrambi i casi.
+it.RemoveData=Vuoi rimuovere anche i tuoi mapping MIDI e i tuoi suoni personalizzati?%n%nSì: le cartelle MIDI e Patch in%n%1%nvengono cancellate, con i profili MIDI, i banchi e le patch che hai salvato, e i tuoi preferiti. L'operazione non si può annullare.%n%nNo: restano per una prossima installazione.%n%nI file del firmware nella cartella ROM restano in entrambi i casi.
 
 [Files]
 Source: "{#BuildDir}\Standalone\MTRX-1K.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -392,6 +392,7 @@ begin
       DelTree(Data + '\MIDI', True, True, True);
       DelTree(Data + '\Patch', True, True, True);
       DeleteFile(Data + '\settings.xml');
+      DeleteFile(Data + '\presets.xml');
     end;
     // what is left empty goes; RemoveDir leaves alone a folder with anything in it
     RemoveDir(Data + '\MIDI');

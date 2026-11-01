@@ -112,6 +112,9 @@ namespace retromulator
         return getDataFolder() + synthFolderName(type) + "/";
     }
 
+    // The file of the RAM bank until 1.0.0 alpha 4, named after the instrument.
+    static constexpr const char* kMatrixRamBankFileBefore = "Oberheim Matrix-1000.syx";
+
     static juce::File getSettingsFile()
     {
         return juce::File(juce::String(HeadlessProcessor::getDataFolder()) + "settings.xml");
@@ -217,6 +220,46 @@ namespace retromulator
     void HeadlessProcessor::setWhitePanel(const bool white)
     {
         writeSettingsBool("whitePanel", white);
+    }
+
+    // The voices of the Matrix, a global setting: 6, 12 or 24.
+    static int readSettingsVoices()
+    {
+        const auto file = getSettingsFile();
+        if(file.existsAsFile())
+            if(const auto xml = juce::XmlDocument::parse(file))
+            {
+                const int v = xml->getIntAttribute("matrixVoices", 6);
+                if(v == 6 || v == 12 || v == 24)
+                    return v;
+            }
+        return 6;
+    }
+
+    static void writeSettingsVoices(const int voices)
+    {
+        const auto file = getSettingsFile();
+        std::unique_ptr<juce::XmlElement> xml;
+        if(file.existsAsFile())
+            xml = juce::XmlDocument::parse(file);
+        if(!xml)
+            xml = std::make_unique<juce::XmlElement>("RetromulatorSettings");
+
+        xml->setAttribute("matrixVoices", voices);
+        xml->writeTo(file);
+    }
+
+    // The open instances of this process, which a change of the voices reaches.
+    static std::mutex& instancesMutex()
+    {
+        static std::mutex m;
+        return m;
+    }
+
+    static std::vector<HeadlessProcessor*>& instances()
+    {
+        static std::vector<HeadlessProcessor*> v;
+        return v;
     }
 
     double HeadlessProcessor::getUiScale()
@@ -686,6 +729,16 @@ namespace retromulator
                && patches.findChildFiles(juce::File::findFiles, true).isEmpty()
                && (!patches.exists() || patches.deleteRecursively()))
                 before.moveFileTo(patches);
+
+            // The RAM bank was named after the instrument and is now Matrix 1000 RAM; its
+            // backup too. A file already there under the new name is left as it is.
+            const auto ramName = juce::File(getMatrixRamBankPath()).getFileName();
+            for(const auto& dir : {patches, patches.getChildFile("Backup")})
+            {
+                const auto old = dir.getChildFile(kMatrixRamBankFileBefore);
+                if(old.existsAsFile() && !dir.getChildFile(ramName).exists())
+                    old.moveFileTo(dir.getChildFile(ramName));
+            }
         }
 
         // Seed the ROM search path with the shared data folder so all loaders
@@ -710,10 +763,20 @@ namespace retromulator
         m_trackerShuffle   = readSettingsBool("trackerShuffle", false);
         m_midiStopAtEnd    = readSettingsBool("midiStopAtEnd", false);
         m_midiShuffle      = readSettingsBool("midiShuffle", false);
+        m_matrixVoices     = readSettingsVoices();
+
+        const std::lock_guard lock(instancesMutex());
+        instances().push_back(this);
     }
 
     HeadlessProcessor::~HeadlessProcessor()
     {
+        {
+            const std::lock_guard lock(instancesMutex());
+            auto& all = instances();
+            all.erase(std::remove(all.begin(), all.end(), this), all.end());
+        }
+
         m_playlistTimer.reset();
         m_programRelay.reset();
 
@@ -1185,13 +1248,13 @@ namespace retromulator
         return {};
     }
 
-    // A program chosen: its voices and spread become the settings.
+    // A program chosen: its spread, detune, mono and effects become the settings. Not the
+    // voices it may carry, which are global.
     void HeadlessProcessor::applyMatrixPatchExtras(const int index)
     {
         if(m_synthType != SynthType::Matrix || index < 0)
             return;
         const auto e = matrixExtrasOf(index);
-        setMatrixVoices(e.voices);
         setMatrixSpread(e.spread);
         setMatrixDetune(e.detune);
         setMatrixMono(e.mono);
@@ -1203,11 +1266,13 @@ namespace retromulator
     void HeadlessProcessor::takeMatrixExtrasReference(const int index)
     {
         const auto e = matrixExtrasOf(index);
-        m_matrixRefVoices = e.voices;
         m_matrixRefSpread = e.spread;
         m_matrixRefDetune = e.detune;
         m_matrixRefMono = e.mono;
-        m_matrixRefFx = e.fx.empty() ? matrixFxOff() : e.fx;
+        // in the form the chain writes now, so that effects saved by an older version compare
+        // equal to the same effects read back
+        fxLib::Chain stored;
+        m_matrixRefFx = !e.fx.empty() && stored.read(e.fx) ? stored.write() : matrixFxOff();
     }
 
     // ── Preset loading ────────────────────────────────────────────────────────
@@ -3187,9 +3252,18 @@ namespace retromulator
 
     // ── Matrix polyphony ────────────────────────────────────────────────────
 
+    // From the selector: remembered for the next instances and given to every open one.
     void HeadlessProcessor::setMatrixVoices(const int voices)
     {
         const int v = voices >= 24 ? 24 : (voices >= 12 ? 12 : 6);
+        writeSettingsVoices(v);
+        const std::lock_guard lock(instancesMutex());
+        for(auto* p : instances())
+            p->adoptMatrixVoices(v);
+    }
+
+    void HeadlessProcessor::adoptMatrixVoices(const int v)
+    {
         if(v == m_matrixVoices)
             return;
         m_matrixVoices = v;
@@ -3256,7 +3330,7 @@ namespace retromulator
 
     namespace
     {
-        constexpr const char* kMatrixRamBankFile  = "Oberheim Matrix-1000.syx";
+        constexpr const char* kMatrixRamBankFile  = "Matrix 1000 RAM.syx";
         constexpr const char* kMatrixRomBankStart = "!ROM Bank ";
 
         // One oscillator as a sawtooth, the filter open and without resonance, every
@@ -3380,6 +3454,41 @@ namespace retromulator
         return names;
     }
 
+    std::vector<std::string> HeadlessProcessor::getMatrixBankFiles()
+    {
+        juce::Array<juce::File> files;
+        juce::File(getSynthDataFolder(SynthType::Matrix)).findChildFiles(files, juce::File::findFiles, false, "*.syx");
+        files.sort();
+        std::vector<std::string> banks;
+        for(const auto& f : files)
+            banks.push_back(f.getFullPathName().toStdString());
+        return banks;
+    }
+
+    std::string HeadlessProcessor::getMatrixBankName() const
+    {
+        return m_sysexFilePath.empty() ? std::string() : juce::File(m_sysexFilePath).getFileNameWithoutExtension().toStdString();
+    }
+
+    presets::Category HeadlessProcessor::getProgramCategory(const int program) const
+    {
+        if(program < 0 || program >= static_cast<int>(m_programNames.size()))
+            return presets::Category::None;
+        return presets::Library::instance().category(getMatrixBankName(), program, m_programNames[static_cast<size_t>(program)]);
+    }
+
+    bool HeadlessProcessor::isProgramFavourite(const int program) const
+    {
+        if(program < 0 || program >= static_cast<int>(m_programNames.size()))
+            return false;
+        return presets::Library::instance().isFavourite(getMatrixBankName(), program, m_programNames[static_cast<size_t>(program)]);
+    }
+
+    bool HeadlessProcessor::isProgramShown(const int program) const
+    {
+        return !m_presetFilter.active() || m_presetFilter.matches(getProgramCategory(program), isProgramFavourite(program));
+    }
+
     bool HeadlessProcessor::getMatrixEditedPatch(uint8_t* data) const
     {
         if(m_synthType != SynthType::Matrix || !m_paramPool)
@@ -3409,13 +3518,14 @@ namespace retromulator
     {
         if(m_synthType != SynthType::Matrix)
             return false;
-        // voices and spread are part of the patch too, once it has been saved with them; mono
-        // by what it plays, so that picking what the keyboard mode does already is no edit
+        // spread and detune are part of the patch too, once it has been saved with them, the
+        // voices not, being global; mono by what it plays, so that picking what the keyboard
+        // mode does already is no edit
         auto* dev = getMatrixDevice();
         const bool monoEdited = dev ? dev->isMonoWith(m_matrixMono.load()) != dev->isMonoWith(m_matrixRefMono)
                                     : m_matrixMono.load() != m_matrixRefMono;
         return (m_paramPool && m_paramPool->hasPatchEdits())
-            || m_matrixVoices != m_matrixRefVoices || m_matrixSpread.load() != m_matrixRefSpread
+            || m_matrixSpread.load() != m_matrixRefSpread
             || m_matrixDetune.load() != m_matrixRefDetune || monoEdited
             || (m_fx && m_fx->write() != m_matrixRefFx);
     }
@@ -3465,6 +3575,11 @@ namespace retromulator
         if(!writeSysexMessages(file, messages))
             return false;
 
+        // the saved patch takes the category of the one it was made from, the initial patch none
+        if(!isMatrixInitPatch() && m_currentProgram >= 0 && m_currentProgram < static_cast<int>(m_programNames.size()))
+            presets::Library::instance().carry(getMatrixBankName(), m_currentProgram, m_programNames[static_cast<size_t>(m_currentProgram)],
+                                               file.getFileNameWithoutExtension().toStdString(), slot, matrixLib::patch::getName(data));
+
         // The saved patch is now the loaded program, so its edits are no longer edits.
         return loadPresetFromFile(file.getFullPathName().toStdString(), file.getFileNameWithoutExtension().toStdString(), slot);
     }
@@ -3499,6 +3614,9 @@ namespace retromulator
         }
         if(!writeSysexMessages(file, messages))
             return "The bank file could not be written.";
+        if(!isMatrixInitPatch() && m_currentProgram >= 0 && m_currentProgram < static_cast<int>(m_programNames.size()))
+            presets::Library::instance().carry(getMatrixBankName(), m_currentProgram, m_programNames[static_cast<size_t>(m_currentProgram)],
+                                               legal.toStdString(), 0, matrixLib::patch::getName(data));
 
         if(!loadPresetFromFile(file.getFullPathName().toStdString(), file.getFileNameWithoutExtension().toStdString(), 0))
             return "The bank was written but could not be loaded.";
@@ -3512,8 +3630,7 @@ namespace retromulator
         const auto init = matrixInitPatch();
         m_paramPool->adoptMatrixPatch(init.data());
         m_matrixInitPatch = true;
-        // the plain starting sound plays as the instrument: 6 voices in the middle
-        setMatrixVoices(6);
+        // the plain starting sound plays as the instrument: in the middle, with the voices set
         setMatrixSpread(0);
         setMatrixDetune(0);
         setMatrixMono(-1);
@@ -4791,6 +4908,9 @@ namespace retromulator
     static constexpr int32_t kMatrixLearnMagic = 0x4C4D584D;
     // 'MXFX': the effects, as fxLib::Chain::write.
     static constexpr int32_t kMatrixFxMagic = 0x58464D58;
+    // 'MXPF': the filter of the presets, the category in the low byte, 256 favourites only,
+    // 512 every bank. After 'MXFX'.
+    static constexpr int32_t kMatrixPresetsMagic = 0x46504D58;
     // "E88D": the board. Written last, and read back from the tail before the device is
     // created, so the boot picks the right one without parsing the blocks in between.
     static constexpr int32_t kEmu88BoardMagic = 0x44383845;
@@ -4875,7 +4995,7 @@ namespace retromulator
         if(m_synthType == SynthType::Matrix)
         {
             appendInt32(destData, kMatrixEditorMagic);
-            appendInt32(destData, (m_editPanelOpen ? 1 : 0) | (isMatrixInitPatch() ? 2 : 0) | (m_fxPageOpen ? 4 : 0));
+            appendInt32(destData, (m_editPanelOpen ? 1 : 0) | (isMatrixInitPatch() ? 2 : 0) | (m_fxPageOpen ? 4 : 0) | (m_presetPageOpen ? 8 : 0));
 
             // ['MXML':int32][length:int32][text]
             if(m_midiLearn)
@@ -4890,6 +5010,10 @@ namespace retromulator
                 appendInt32(destData, kMatrixFxMagic);
                 appendBytes(destData, m_fx->write());
             }
+
+            // ['MXPF':int32][flags:int32]
+            appendInt32(destData, kMatrixPresetsMagic);
+            appendInt32(destData, static_cast<int32_t>(m_presetFilter.category) | (m_presetFilter.favourites ? 256 : 0) | (m_presetAllBanks ? 512 : 0));
         }
 
         // 88emu per-part programs and the edited part:
@@ -5097,16 +5221,11 @@ namespace retromulator
                 m_matrixLfoSync[1] = lfo2;
             }
 
-            // the voices before it; a session saved without them had one instrument
-            m_matrixVoices = 6;
-            int32_t voicesMagic = 0, voices = 0;
+            // the voices before it, still written, no longer used: they are the global setting
+            m_matrixVoices = readSettingsVoices();
+            int32_t voicesMagic = 0;
             if(magic == kMatrixLfoSyncMagic && sizeInBytes >= 20)
-            {
                 std::memcpy(&voicesMagic, bytes + sizeInBytes - 20, 4);
-                std::memcpy(&voices, bytes + sizeInBytes - 16, 4);
-                if(voicesMagic == kMatrixVoicesMagic && (voices == 6 || voices == 12 || voices == 24))
-                    m_matrixVoices = voices;
-            }
 
             // and the spread before those
             m_matrixSpread.store(0);
@@ -5191,11 +5310,14 @@ namespace retromulator
             // Restore the saved file path so navigatePatch can find the file in
             // the bank list for cross-bank navigation after a project reload.
             m_sysexFilePath = sysexFilePath;
-            // A project saved before the product or its bank folder was renamed names a
-            // file that has moved with the folder: look for it where the banks are now.
+            // A project saved before the product, its bank folder or the RAM bank was renamed
+            // names a file that has moved: look for it where the banks are now.
             if(newType == SynthType::Matrix && !sysexFilePath.empty() && !juce::File(sysexFilePath).existsAsFile())
             {
-                const auto moved = juce::File(getSynthDataFolder(newType)).getChildFile(juce::File(sysexFilePath).getFileName());
+                auto name = juce::File(sysexFilePath).getFileName();
+                if(name == kMatrixRamBankFileBefore)
+                    name = juce::File(getMatrixRamBankPath()).getFileName();
+                const auto moved = juce::File(getSynthDataFolder(newType)).getChildFile(name);
                 if(moved.existsAsFile())
                     m_sysexFilePath = moved.getFullPathName().toStdString();
             }
@@ -5312,6 +5434,7 @@ namespace retromulator
             m_editPanelOpen   = (editorFlags & 1) != 0;
             m_matrixInitPatch = (editorFlags & 2) != 0;
             m_fxPageOpen      = (editorFlags & 4) != 0;
+            m_presetPageOpen  = (editorFlags & 8) != 0;
         }
         else
         {
@@ -5346,6 +5469,27 @@ namespace retromulator
         {
             offset = fxStart;
             fxState.clear();
+        }
+
+        // The filter of the presets (optional: a session saved before 1.0.0 alpha 4 shows them all).
+        const int presetsStart = offset;
+        int32_t presetsMagic = 0, presetsFlags = 0;
+        if(newType == SynthType::Matrix
+           && readInt32(bytes, sizeInBytes, offset, presetsMagic) && presetsMagic == kMatrixPresetsMagic
+           && readInt32(bytes, sizeInBytes, offset, presetsFlags))
+        {
+            m_presetFilter.category = static_cast<presets::Category>(std::clamp(presetsFlags & 255, 0, presets::CategoryCount - 1));
+            m_presetFilter.favourites = (presetsFlags & 256) != 0;
+            m_presetAllBanks = (presetsFlags & 512) != 0;
+        }
+        else
+        {
+            offset = presetsStart;
+            if(newType == SynthType::Matrix)
+            {
+                m_presetFilter = {};
+                m_presetAllBanks = false;
+            }
         }
 
         // The state carries the bank as it was when it was saved. Its file is what the

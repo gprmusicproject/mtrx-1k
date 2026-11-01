@@ -7,6 +7,8 @@
 
 #include <array>
 #include <cmath>
+#include <cstring>
+#include <map>
 
 namespace retromulator
 {
@@ -2316,6 +2318,374 @@ namespace retromulator
         };
     }
 
+    // ── Presets page ──────────────────────────────────────────────────────────
+
+    namespace
+    {
+        // Layout of the presets page: the bar of the filters on top, the keys in its first row
+        // and the search in its second, the list under it.
+        constexpr int kPsLeft     = 10;
+        constexpr int kPsWidth    = rackPanel::kWidth - 2 * kPsLeft;
+        constexpr int kPsBarY     = 42;
+        constexpr int kPsBarH     = 72;
+        constexpr int kPsKeysY    = kPsBarY + 8;
+        constexpr int kPsSearchY  = kPsBarY + 39;
+        constexpr int kPsSearchH  = 26;
+        constexpr int kPsSearchX  = kPsLeft + 36, kPsSearchW = 300;
+        constexpr int kPsHeadY    = 122;   // the heads of the columns
+        constexpr int kPsListY    = 142;
+        constexpr int kPsRowH     = 28;
+        // the columns of the list, from the left of a row
+        constexpr int kPsStarX    = 10,  kPsStarW = 28;
+        constexpr int kPsNumberX  = 44,  kPsNumberW = 52;
+        constexpr int kPsNameX    = 104, kPsNameW = 240;
+        constexpr int kPsCatX     = 352, kPsCatW = 130;
+        constexpr int kPsBankX    = 494;
+
+        juce::String starText(const bool filled) { return juce::String::charToString(juce::juce_wchar(filled ? 0x2605 : 0x2606)); }
+        constexpr juce::uint32 kStarOn = 0xffffc23a;
+
+        // What a key of the bar does: the bank or every bank, a category (None: all of them),
+        // or the favourites only.
+        enum class PresetKeyKind { ThisBank, AllBanks, Category, Favourites };
+
+        class PresetKey final : public EditPanel::Control
+        {
+        public:
+            PresetKey(EditPanel::Context& context, const PresetKeyKind kind, const presets::Category category = presets::Category::None)
+                : Control(context), m_kind(kind), m_category(category)
+            {
+                setTitle(legend());
+                setMouseCursor(juce::MouseCursor::PointingHandCursor);
+            }
+
+            void refresh() override
+            {
+                const int v = lit() ? 1 : 0;
+                if(v != m_shown)
+                {
+                    m_shown = v;
+                    repaint();
+                }
+            }
+
+            void paint(juce::Graphics& g) override
+            {
+                drawLampKey(g, getLocalBounds().toFloat(), legend(), lit(), ctx.proc.getSynthType() == SynthType::Matrix);
+            }
+
+            void mouseDown(const juce::MouseEvent&) override
+            {
+                auto& p = ctx.proc;
+                switch(m_kind)
+                {
+                case PresetKeyKind::ThisBank:   p.m_presetAllBanks = false; break;
+                case PresetKeyKind::AllBanks:   p.m_presetAllBanks = true; break;
+                case PresetKeyKind::Category:   p.m_presetFilter.category = m_category; break;
+                case PresetKeyKind::Favourites: p.m_presetFilter.favourites = !p.m_presetFilter.favourites; break;
+                }
+                if(auto* parent = getParentComponent())
+                    parent->repaint(kPsLeft, kPsBarY, kPsWidth, kPsBarH);
+                refresh();
+            }
+
+        private:
+            juce::String legend() const
+            {
+                switch(m_kind)
+                {
+                case PresetKeyKind::ThisBank:   return "This bank";
+                case PresetKeyKind::AllBanks:   return "All banks";
+                case PresetKeyKind::Favourites: return starText(true) + " Favourites";
+                case PresetKeyKind::Category:   break;
+                }
+                return m_category == presets::Category::None ? juce::String("All") : juce::String(presets::categoryName(m_category));
+            }
+
+            bool lit() const
+            {
+                const auto& p = ctx.proc;
+                switch(m_kind)
+                {
+                case PresetKeyKind::ThisBank:   return !p.m_presetAllBanks;
+                case PresetKeyKind::AllBanks:   return p.m_presetAllBanks;
+                case PresetKeyKind::Favourites: return p.m_presetFilter.favourites;
+                case PresetKeyKind::Category:   break;
+                }
+                return p.m_presetFilter.category == m_category;
+            }
+
+            PresetKeyKind m_kind;
+            presets::Category m_category;
+            int m_shown = -1;
+        };
+    }
+
+    // The patches the filter lets through, of the loaded bank or of every bank, in a list with
+    // their star, number, name, category and bank. A click on the star makes a patch a
+    // favourite or not, one on the category chooses another; anywhere else, or the arrow keys
+    // and Return, load the patch.
+    class EditPanel::PresetList final : public juce::Component, private juce::ListBoxModel
+    {
+    public:
+        PresetList(Context& context, std::function<void()> programChanged)
+            : m_ctx(context), m_programChanged(std::move(programChanged))
+        {
+            m_list.setModel(this);
+            m_list.setRowHeight(kPsRowH);
+            m_list.setOutlineThickness(0);
+            m_list.setColour(juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
+            m_list.setTitle("Presets");
+            addAndMakeVisible(m_list);
+        }
+
+        void resized() override { m_list.setBounds(getLocalBounds()); }
+
+        // Fills the list again when what it shows has changed; keeps the loaded patch selected.
+        void refresh()
+        {
+            auto& p = m_ctx.proc;
+            const auto revision = presets::Library::instance().getRevision();
+            const auto path = p.getSysexFilePath();
+            // banks of another instance or saved into: looked at now and then
+            if(p.m_presetAllBanks && ++m_ticks >= 15)
+            {
+                m_ticks = 0;
+                int64_t stamp = 0;
+                for(const auto& b : HeadlessProcessor::getMatrixBankFiles())
+                    stamp += juce::File(b).getLastModificationTime().toMilliseconds() % 1000003;
+                if(stamp != m_banksStamp)
+                {
+                    m_banksStamp = stamp;
+                    m_names.clear();
+                    m_revision = 0;
+                }
+            }
+            const bool changed = revision != m_revision || path != m_path || p.getBankGeneration() != m_generation
+                              || p.m_presetAllBanks != m_allBanks || p.m_presetFilter.category != m_filter.category
+                              || p.m_presetFilter.favourites != m_filter.favourites || p.getProgramCount() != m_count
+                              || m_search != m_builtSearch;
+            if(changed)
+            {
+                m_builtSearch = m_search;
+                m_revision = revision;
+                m_path = path;
+                m_generation = p.getBankGeneration();
+                m_allBanks = p.m_presetAllBanks;
+                m_filter = p.m_presetFilter;
+                m_count = p.getProgramCount();
+                build();
+                m_list.updateContent();
+                m_list.repaint();
+                if(auto* parent = getParentComponent())
+                    parent->repaint(kPsLeft, kPsBarY, kPsWidth, kPsHeadY + 18 - kPsBarY);
+            }
+            // the loaded patch selected, without loading it again
+            const int program = p.getCurrentProgram();
+            if(changed || program != m_program)
+            {
+                m_program = program;
+                int row = -1;
+                for(size_t i = 0; i < m_rows.size(); ++i)
+                    if(m_rows[i].path == path && m_rows[i].slot == program)
+                        row = static_cast<int>(i);
+                m_selecting = true;
+                if(row >= 0)
+                {
+                    m_list.selectRow(row, false, true);
+                    m_list.scrollToEnsureRowIsOnscreen(row);
+                }
+                else
+                    m_list.deselectAllRows();
+                m_selecting = false;
+                m_list.repaint();
+            }
+        }
+
+        int count() const { return static_cast<int>(m_rows.size()); }
+        bool showsBanks() const { return m_allBanks; }
+
+        // Only the patches whose name holds this text, in upper or lower case; empty: all.
+        void setSearch(const juce::String& text)
+        {
+            m_search = text.trim();
+            refresh();
+        }
+        bool searches() const { return m_search.isNotEmpty(); }
+
+        // Return in the search: the first patch found
+        void loadFirst() { load(0); }
+
+    private:
+        struct Row
+        {
+            std::string path, bank, name;
+            int slot = 0;
+            presets::Category category = presets::Category::None;
+            bool favourite = false;
+        };
+
+        // the number the instrument gives a patch: the ROM banks count from 200
+        static int numberOf(const std::string& bank, const int slot)
+        {
+            constexpr const char* rom = "!ROM Bank ";
+            if(bank.rfind(rom, 0) == 0 && bank.size() == std::strlen(rom) + 1)
+                return (bank.back() - '0') * 100 + slot;
+            return slot;
+        }
+
+        const std::vector<std::string>& namesOf(const std::string& path)
+        {
+            auto it = m_names.find(path);
+            if(it == m_names.end())
+                it = m_names.emplace(path, HeadlessProcessor::getMatrixBankPatchNames(path)).first;
+            return it->second;
+        }
+
+        void build()
+        {
+            m_rows.clear();
+            auto& p = m_ctx.proc;
+            if(p.getSynthType() != SynthType::Matrix || p.getProgramCount() == 0)
+                return;
+            auto& library = presets::Library::instance();
+            const auto add = [&](const std::string& path, const std::string& bank, const std::vector<std::string>& names)
+            {
+                for(int slot = 0; slot < static_cast<int>(names.size()); ++slot)
+                {
+                    Row r{path, bank, names[static_cast<size_t>(slot)], slot};
+                    r.category = library.category(bank, slot, r.name);
+                    r.favourite = library.isFavourite(bank, slot, r.name);
+                    if((!m_filter.active() || m_filter.matches(r.category, r.favourite))
+                       && (m_search.isEmpty() || juce::String(r.name).containsIgnoreCase(m_search)))
+                        m_rows.push_back(std::move(r));
+                }
+            };
+            if(m_allBanks)
+            {
+                for(const auto& path : HeadlessProcessor::getMatrixBankFiles())
+                    add(path, juce::File(path).getFileNameWithoutExtension().toStdString(),
+                        path == p.getSysexFilePath() ? p.getProgramNames() : namesOf(path));
+            }
+            else
+                add(p.getSysexFilePath(), p.getMatrixBankName(), p.getProgramNames());
+        }
+
+        int getNumRows() override { return count(); }
+
+        void paintListBoxItem(const int row, juce::Graphics& g, const int width, const int height, const bool selected) override
+        {
+            if(row < 0 || row >= count())
+                return;
+            const auto& st = *m_ctx.style;
+            const auto& r = m_rows[static_cast<size_t>(row)];
+            if(selected)
+            {
+                g.setColour(juce::Colour(st.knobArc).withAlpha(0.22f));
+                g.fillRoundedRectangle(juce::Rectangle<float>(2.0f, 1.0f, static_cast<float>(width) - 4.0f, static_cast<float>(height) - 2.0f), 3.0f);
+            }
+            else if(row % 2 == 1)
+            {
+                g.setColour(juce::Colour(st.frame).withAlpha(0.5f));
+                g.fillRect(0, 0, width, height);
+            }
+            g.setFont(sans(18.0f));
+            g.setColour(r.favourite ? juce::Colour(kStarOn) : juce::Colour(st.label).withAlpha(0.45f));
+            g.drawText(starText(r.favourite), kPsStarX, 0, kPsStarW, height, juce::Justification::centred, false);
+            g.setColour(juce::Colour(st.value));
+            g.setFont(sans(14.0f, selected));
+            g.drawText(juce::String(numberOf(r.bank, r.slot)).paddedLeft('0', 3), kPsNumberX, 0, kPsNumberW, height, juce::Justification::centredLeft, false);
+            g.drawText(r.name, kPsNameX, 0, kPsNameW, height, juce::Justification::centredLeft, false);
+            g.setColour(juce::Colour(r.category == presets::Category::None ? st.label : st.value).withAlpha(r.category == presets::Category::None ? 0.45f : 1.0f));
+            g.setFont(sans(13.0f));
+            g.drawText(r.category == presets::Category::None ? juce::String("-") : juce::String(presets::categoryName(r.category)),
+                       kPsCatX, 0, kPsCatW, height, juce::Justification::centredLeft, false);
+            if(m_allBanks)
+            {
+                g.setColour(juce::Colour(st.label));
+                g.drawText(r.bank, kPsBankX, 0, width - kPsBankX - 10, height, juce::Justification::centredLeft, true);
+            }
+        }
+
+        void listBoxItemClicked(const int row, const juce::MouseEvent& e) override
+        {
+            if(row < 0 || row >= count())
+                return;
+            const auto r = m_rows[static_cast<size_t>(row)];
+            auto& library = presets::Library::instance();
+            if(e.x >= kPsStarX && e.x < kPsStarX + kPsStarW)
+            {
+                library.setFavourite(r.bank, r.slot, r.name, !r.favourite);
+                refresh();
+                return;
+            }
+            if(e.x >= kPsCatX && e.x < kPsCatX + kPsCatW)
+            {
+                juce::PopupMenu menu;
+                for(int c = 0; c < presets::CategoryCount; ++c)
+                {
+                    const auto category = static_cast<presets::Category>(c);
+                    menu.addItem(c + 1, c == 0 ? juce::String("No category") : juce::String(presets::categoryName(category)), true, category == r.category);
+                }
+                juce::Component::SafePointer<PresetList> safe(this);
+                menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(localAreaToGlobal(
+                                       juce::Rectangle<int>(kPsCatX, m_list.getRowPosition(row, true).getY(), kPsCatW, kPsRowH))),
+                                   [safe, r](const int chosen)
+                                   {
+                                       if(safe == nullptr)
+                                           return;
+                                       if(chosen > 0)
+                                           presets::Library::instance().setCategory(r.bank, r.slot, r.name, static_cast<presets::Category>(chosen - 1));
+                                       // the loaded patch selected again
+                                       safe->m_program = -2;
+                                       safe->refresh();
+                                   });
+                return;
+            }
+            load(row);
+        }
+
+        void selectedRowsChanged(const int row) override
+        {
+            // the arrow keys move through the list and load as they go
+            if(!m_selecting && row >= 0 && juce::ModifierKeys::currentModifiers.isAnyMouseButtonDown() == false)
+                load(row);
+        }
+
+        void returnKeyPressed(const int row) override { load(row); }
+
+        void load(const int row)
+        {
+            if(row < 0 || row >= count())
+                return;
+            const auto& r = m_rows[static_cast<size_t>(row)];
+            auto& p = m_ctx.proc;
+            if(r.path == p.getSysexFilePath())
+            {
+                if(r.slot != p.getCurrentProgram())
+                    p.selectProgram(r.slot);
+            }
+            else
+                p.loadPresetFromFile(r.path, r.bank, r.slot);
+            if(m_programChanged)
+                m_programChanged();
+        }
+
+        Context& m_ctx;
+        std::function<void()> m_programChanged;
+        juce::ListBox m_list;
+        std::vector<Row> m_rows;
+        std::map<std::string, std::vector<std::string>> m_names;   // of the banks not loaded
+        uint32_t m_revision = 0, m_generation = 0;
+        std::string m_path;
+        bool m_allBanks = false;
+        presets::Filter m_filter;
+        juce::String m_search, m_builtSearch;
+        int m_count = -1, m_program = -2, m_ticks = 0;
+        int64_t m_banksStamp = 0;
+        bool m_selecting = false;
+    };
+
     // ── EditPanel ─────────────────────────────────────────────────────────────
 
     namespace
@@ -2343,6 +2713,7 @@ namespace retromulator
     {
         addSections();
         addEffects();
+        addPresets();
 
         auto save = std::make_unique<TextKey>("Save");
         save->onClick = [this] { showSave(); };
@@ -2562,6 +2933,7 @@ namespace retromulator
     void EditPanel::setTheme(const rackPanel::Theme theme)
     {
         m_context->style = &styleFor(theme);
+        styleSearch();
         repaint();
     }
 
@@ -2585,6 +2957,9 @@ namespace retromulator
         }
         for(auto& c : pageControls())
             c->refresh();
+
+        if(m_page == Page::Presets)
+            m_presetList->refresh();
 
         // the chain drawn on the effects page lights the racks that play
         if(m_page == Page::Effects)
@@ -2693,7 +3068,7 @@ namespace retromulator
         // header: title, loaded patch, edited lamp
         g.setColour(juce::Colour(st.title));
         g.setFont(sans(12.5f, true));
-        g.drawText(m_page == Page::Patch ? "PATCH EDIT" : "EFFECTS", kLeft + 4, 7, 100, 22, juce::Justification::centredLeft, false);
+        g.drawText(m_page == Page::Patch ? "PATCH EDIT" : m_page == Page::Effects ? "EFFECTS" : "PRESETS", kLeft + 4, 7, 100, 22, juce::Justification::centredLeft, false);
 
         const juce::Rectangle<float> screen(118.0f, 6.0f, 240.0f, 24.0f);
         drawScreen(g, screen);
@@ -2723,6 +3098,11 @@ namespace retromulator
         if(m_page == Page::Effects)
         {
             paintEffects(g);
+            return;
+        }
+        if(m_page == Page::Presets)
+        {
+            paintPresets(g);
             return;
         }
 
@@ -2759,6 +3139,10 @@ namespace retromulator
             c->setVisible(page == Page::Patch);
         for(auto& c : m_fxControls)
             c->setVisible(page == Page::Effects);
+        for(auto& c : m_presetControls)
+            c->setVisible(page == Page::Presets);
+        m_presetList->setVisible(page == Page::Presets);
+        m_presetSearch->setVisible(page == Page::Presets);
         for(auto& c : pageControls())
             c->refresh();
         m_learnLayer->repaint();
@@ -2788,6 +3172,116 @@ namespace retromulator
                 add(std::make_unique<FxTypeKey>(ctx, r, t), {kFxTypeX + (t % 3) * (kFxTypeW + 6), y + typeKeysTop(r) + (t / 3) * (kFxKeyHeight + kFxKeyGap), kFxTypeW, kFxKeyHeight});
             for(int c = 0; c < fxLib::MaxControls; ++c)
                 add(std::make_unique<FxControl>(ctx, r, c), {kFxKnobX + c * kFxKnobW, y + kFxKnobTop, kFxKnobW, kFxKnobH});
+        }
+    }
+
+    void EditPanel::addPresets()
+    {
+        auto& ctx = *m_context;
+        const auto add = [this](std::unique_ptr<Control> c, const juce::Rectangle<int> bounds)
+        {
+            c->setBounds(bounds);
+            addChildComponent(*c);
+            m_presetControls.push_back(std::move(c));
+        };
+        const int y = kPsKeysY, h = 24;
+        int x = kPsLeft + 12;
+        add(std::make_unique<PresetKey>(ctx, PresetKeyKind::ThisBank), {x, y, 84, h});
+        x += 88;
+        add(std::make_unique<PresetKey>(ctx, PresetKeyKind::AllBanks), {x, y, 84, h});
+        x += 84 + 24;
+        for(int c = 0; c < presets::CategoryCount; ++c)
+        {
+            add(std::make_unique<PresetKey>(ctx, PresetKeyKind::Category, static_cast<presets::Category>(c)), {x, y, 62, h});
+            x += 66;
+        }
+        x += 20;
+        add(std::make_unique<PresetKey>(ctx, PresetKeyKind::Favourites), {x, y, 112, h});
+
+        m_presetList = std::make_unique<PresetList>(ctx, [this]
+        {
+            if(onProgramChanged)
+                onProgramChanged();
+        });
+        m_presetList->setBounds(kPsLeft, kPsListY, kPsWidth, kHeight - kPsListY - 8);
+        addChildComponent(*m_presetList);
+
+        // the search by name: the list follows every key typed, Return loads the first patch
+        // found and Escape empties it
+        m_presetSearch = std::make_unique<juce::TextEditor>();
+        auto& search = *m_presetSearch;
+        search.setTitle("Search");
+        search.setFont(sans(14.0f));
+        search.setJustification(juce::Justification::centredLeft);
+        search.setIndents(8, 0);
+        search.setInputRestrictions(24);
+        search.onTextChange = [this] { m_presetList->setSearch(m_presetSearch->getText()); repaint(kPsLeft, kPsBarY, kPsWidth, kPsBarH); };
+        search.onReturnKey = [this] { m_presetList->loadFirst(); };
+        search.onEscapeKey = [this] { m_presetSearch->clear(); m_presetList->setSearch({}); repaint(kPsLeft, kPsBarY, kPsWidth, kPsBarH); };
+        search.setBounds(kPsSearchX, kPsSearchY, kPsSearchW, kPsSearchH);
+        addChildComponent(search);
+        styleSearch();
+    }
+
+    // The search box in the finish of the panel
+    void EditPanel::styleSearch()
+    {
+        const auto& st = *m_context->style;
+        auto& search = *m_presetSearch;
+        search.setColour(juce::TextEditor::backgroundColourId, juce::Colour(st.boxFill));
+        search.setColour(juce::TextEditor::textColourId, juce::Colour(st.value));
+        search.setColour(juce::TextEditor::highlightColourId, juce::Colour(st.knobArc).withAlpha(0.3f));
+        search.setColour(juce::TextEditor::highlightedTextColourId, juce::Colour(st.value));
+        search.setColour(juce::CaretComponent::caretColourId, juce::Colour(st.value));
+        search.setColour(juce::TextEditor::outlineColourId, juce::Colour(st.boxOutline));
+        search.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(st.knobArc));
+        search.setTextToShowWhenEmpty("Search by name", juce::Colour(st.label).withAlpha(0.6f));
+        search.applyColourToAllText(juce::Colour(st.value));
+        search.repaint();
+    }
+
+    // The bar of the filters, how many patches they let through, the heads of the columns
+    void EditPanel::paintPresets(juce::Graphics& g)
+    {
+        const auto& st = *m_context->style;
+        const juce::Rectangle<float> bar(static_cast<float>(kPsLeft), static_cast<float>(kPsBarY), static_cast<float>(kPsWidth), static_cast<float>(kPsBarH));
+        g.setColour(juce::Colour(st.frame));
+        g.fillRoundedRectangle(bar, 5.0f);
+        g.setColour(juce::Colour(st.frameOutline));
+        g.drawRoundedRectangle(bar.reduced(0.5f), 5.0f, 1.0f);
+
+        // a magnifying glass before the search
+        {
+            const float cx = static_cast<float>(kPsSearchX) - 16.0f, cy = static_cast<float>(kPsSearchY) + kPsSearchH * 0.5f - 1.5f;
+            g.setColour(juce::Colour(st.label));
+            g.drawEllipse(cx - 6.0f, cy - 6.0f, 10.0f, 10.0f, 1.8f);
+            g.drawLine(cx + 2.6f, cy + 2.6f, cx + 7.0f, cy + 7.0f, 2.2f);
+        }
+
+        const int shown = m_presetList->count();
+        g.setColour(juce::Colour(st.value));
+        g.setFont(sans(13.0f, true));
+        g.drawText(juce::String(shown) + (shown == 1 ? " patch" : " patches"), kPsLeft + kPsWidth - 150, kPsSearchY, 138, kPsSearchH, juce::Justification::centredRight, false);
+
+        g.setColour(juce::Colour(st.label));
+        g.setFont(sans(13.5f));
+        const auto head = [&](const char* text, const int x, const int w) { g.drawText(text, kPsLeft + x, kPsHeadY - 1, w, 18, juce::Justification::centredLeft, false); };
+        head("Fav", kPsStarX + 2, kPsStarW);
+        head("No.", kPsNumberX, kPsNumberW);
+        head("Name", kPsNameX, kPsNameW);
+        head("Category", kPsCatX, kPsCatW);
+        if(m_presetList->showsBanks())
+            head("Bank", kPsBankX, 200);
+        g.setColour(juce::Colour(st.title).withAlpha(0.55f));
+        g.fillRect(static_cast<float>(kPsLeft), static_cast<float>(kPsListY) - 2.0f, static_cast<float>(kPsWidth), 1.2f);
+
+        if(shown == 0)
+        {
+            g.setColour(juce::Colour(st.label));
+            g.setFont(sans(14.0f));
+            g.drawText(m_proc.getSynthType() != SynthType::Matrix ? "The unit is off."
+                       : m_presetList->searches() ? "No patch matches the search and the filter." : "No patch matches the filter.",
+                       kPsLeft, kPsListY + 20, kPsWidth, 20, juce::Justification::centred, false);
         }
     }
 
