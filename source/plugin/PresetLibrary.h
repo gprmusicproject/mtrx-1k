@@ -19,6 +19,13 @@ namespace retromulator::presets
     constexpr int CategoryCount = 9;
     const char* categoryName(Category _category);
 
+    // The column the list of the presets is sorted by: the banks and their numbers, the
+    // favourites first, the names from A to Z, the categories in the order above with none last,
+    // the numbers whatever the bank. Up or down; patches that come level keep the order of the
+    // banks.
+    enum class Sort : uint8_t { Bank, Favourites, Name, Category, Number };
+    constexpr int SortCount = 5;
+
     // What the panel of the presets, the PATCH selector and the < > keys let through
     struct Filter
     {

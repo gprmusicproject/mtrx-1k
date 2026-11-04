@@ -5013,7 +5013,8 @@ namespace retromulator
 
             // ['MXPF':int32][flags:int32]
             appendInt32(destData, kMatrixPresetsMagic);
-            appendInt32(destData, static_cast<int32_t>(m_presetFilter.category) | (m_presetFilter.favourites ? 256 : 0) | (m_presetAllBanks ? 512 : 0));
+            appendInt32(destData, static_cast<int32_t>(m_presetFilter.category) | (m_presetFilter.favourites ? 256 : 0) | (m_presetAllBanks ? 512 : 0)
+                                  | (static_cast<int32_t>(m_presetSort) << 10) | (m_presetSortDown ? 8192 : 0));
         }
 
         // 88emu per-part programs and the edited part:
@@ -5481,6 +5482,9 @@ namespace retromulator
             m_presetFilter.category = static_cast<presets::Category>(std::clamp(presetsFlags & 255, 0, presets::CategoryCount - 1));
             m_presetFilter.favourites = (presetsFlags & 256) != 0;
             m_presetAllBanks = (presetsFlags & 512) != 0;
+            // the order, from 1.0.0; before it the list was in the order of the banks
+            m_presetSort = static_cast<presets::Sort>(std::clamp((presetsFlags >> 10) & 7, 0, presets::SortCount - 1));
+            m_presetSortDown = (presetsFlags & 8192) != 0;
         }
         else
         {
@@ -5489,6 +5493,8 @@ namespace retromulator
             {
                 m_presetFilter = {};
                 m_presetAllBanks = false;
+                m_presetSort = presets::Sort::Bank;
+                m_presetSortDown = false;
             }
         }
 

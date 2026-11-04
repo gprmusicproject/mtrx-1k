@@ -2419,6 +2419,128 @@ namespace retromulator
             presets::Category m_category;
             int m_shown = -1;
         };
+
+        // The heads of the columns of the list. Each has a small arrow: a click on a head sorts
+        // the list by its column, from the top down, a click on the head of that column again
+        // the other way. The column the list is sorted by has its arrow lit and pointing the way
+        // it goes; the others a dim pair. In one bank the order of the bank is that of the numbers.
+        class PresetHeads final : public EditPanel::Control, public juce::SettableTooltipClient
+        {
+        public:
+            explicit PresetHeads(EditPanel::Context& context) : Control(context)
+            {
+                setTitle("Columns");
+                setMouseCursor(juce::MouseCursor::PointingHandCursor);
+                setTooltip("Click a column to sort the list by it; click it again to reverse the order.");
+            }
+
+            void refresh() override
+            {
+                const auto& p = ctx.proc;
+                const int v = static_cast<int>(p.m_presetSort) | (p.m_presetSortDown ? 8 : 0) | (p.m_presetAllBanks ? 16 : 0);
+                if(v != m_shown)
+                {
+                    m_shown = v;
+                    repaint();
+                }
+            }
+
+            void paint(juce::Graphics& g) override
+            {
+                const auto& st = style();
+                g.setFont(sans(13.5f));
+                const auto h = static_cast<float>(getHeight());
+                for(int c = 0; c < columnCount(); ++c)
+                {
+                    const auto& col = kColumns[c];
+                    g.setColour(juce::Colour(c == m_hover ? st.value : st.label));
+                    g.drawText(col.text, col.x, 0, col.w, getHeight(), juce::Justification::centredLeft, false);
+                    // the arrow after the text
+                    const float ax = static_cast<float>(col.x) + juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), col.text) + 4.0f;
+                    const float cy = h * 0.5f;
+                    juce::Path arrow;
+                    if(sorted(c))
+                    {
+                        if(ctx.proc.m_presetSortDown)
+                            arrow.addTriangle(ax, cy - 2.5f, ax + 8.0f, cy - 2.5f, ax + 4.0f, cy + 3.0f);
+                        else
+                            arrow.addTriangle(ax, cy + 3.0f, ax + 8.0f, cy + 3.0f, ax + 4.0f, cy - 2.5f);
+                        g.setColour(juce::Colour(st.value));
+                    }
+                    else
+                    {
+                        arrow.addTriangle(ax + 0.5f, cy - 1.5f, ax + 6.5f, cy - 1.5f, ax + 3.5f, cy - 5.5f);
+                        arrow.addTriangle(ax + 0.5f, cy + 1.5f, ax + 6.5f, cy + 1.5f, ax + 3.5f, cy + 5.5f);
+                        g.setColour(juce::Colour(st.label).withAlpha(0.45f));
+                    }
+                    g.fillPath(arrow);
+                }
+            }
+
+            void mouseMove(const juce::MouseEvent& e) override { setHover(columnAt(e.x)); }
+            void mouseExit(const juce::MouseEvent&) override { setHover(-1); }
+
+            void mouseDown(const juce::MouseEvent& e) override
+            {
+                const int c = columnAt(e.x);
+                if(c < 0)
+                    return;
+                auto& p = ctx.proc;
+                if(sorted(c))
+                    p.m_presetSortDown = !p.m_presetSortDown;
+                else
+                {
+                    p.m_presetSort = kColumns[c].sort;
+                    p.m_presetSortDown = false;
+                }
+                refresh();
+            }
+
+        private:
+            struct Column
+            {
+                const char* text;
+                int x, w;   // from the left of the list, as its rows have them; w up to the next head
+                presets::Sort sort;
+            };
+            static constexpr Column kColumns[] = {
+                {"Fav",      kPsStarX,     kPsNumberX - kPsStarX,     presets::Sort::Favourites},
+                {"No.",      kPsNumberX,   kPsNameX - kPsNumberX,     presets::Sort::Number},
+                {"Name",     kPsNameX,     kPsCatX - kPsNameX,        presets::Sort::Name},
+                {"Category", kPsCatX,      kPsBankX - kPsCatX,        presets::Sort::Category},
+                {"Bank",     kPsBankX,     200,                       presets::Sort::Bank},
+            };
+
+            // the bank's own column only when the list shows every bank
+            int columnCount() const { return ctx.proc.m_presetAllBanks ? 5 : 4; }
+
+            bool sorted(const int c) const
+            {
+                const auto sort = ctx.proc.m_presetSort;
+                if(sort == presets::Sort::Bank && !ctx.proc.m_presetAllBanks)
+                    return kColumns[c].sort == presets::Sort::Number;
+                return kColumns[c].sort == sort;
+            }
+
+            int columnAt(const int x) const
+            {
+                for(int c = 0; c < columnCount(); ++c)
+                    if(x >= kColumns[c].x - 4 && x < kColumns[c].x + kColumns[c].w - 4)
+                        return c;
+                return -1;
+            }
+
+            void setHover(const int c)
+            {
+                if(c != m_hover)
+                {
+                    m_hover = c;
+                    repaint();
+                }
+            }
+
+            int m_shown = -1, m_hover = -1;
+        };
     }
 
     // The patches the filter lets through, of the loaded bank or of every bank, in a list with
@@ -2461,10 +2583,13 @@ namespace retromulator
                     m_revision = 0;
                 }
             }
-            const bool changed = revision != m_revision || path != m_path || p.getBankGeneration() != m_generation
-                              || p.m_presetAllBanks != m_allBanks || p.m_presetFilter.category != m_filter.category
-                              || p.m_presetFilter.favourites != m_filter.favourites || p.getProgramCount() != m_count
-                              || m_search != m_builtSearch;
+            // what the player chose to see: another one starts the list from the top when the
+            // loaded patch is not in it
+            const bool chosen = p.m_presetAllBanks != m_allBanks || p.m_presetFilter.category != m_filter.category
+                             || p.m_presetFilter.favourites != m_filter.favourites || m_search != m_builtSearch
+                             || p.m_presetSort != m_sort || p.m_presetSortDown != m_sortDown;
+            const bool changed = chosen || revision != m_revision || path != m_path || p.getBankGeneration() != m_generation
+                              || p.getProgramCount() != m_count;
             if(changed)
             {
                 m_builtSearch = m_search;
@@ -2473,12 +2598,14 @@ namespace retromulator
                 m_generation = p.getBankGeneration();
                 m_allBanks = p.m_presetAllBanks;
                 m_filter = p.m_presetFilter;
+                m_sort = p.m_presetSort;
+                m_sortDown = p.m_presetSortDown;
                 m_count = p.getProgramCount();
                 build();
                 m_list.updateContent();
                 m_list.repaint();
                 if(auto* parent = getParentComponent())
-                    parent->repaint(kPsLeft, kPsBarY, kPsWidth, kPsHeadY + 18 - kPsBarY);
+                    parent->repaint(kPsLeft, kPsBarY, kPsWidth, kPsBarH);
             }
             // the loaded patch selected, without loading it again
             const int program = p.getCurrentProgram();
@@ -2496,14 +2623,17 @@ namespace retromulator
                     m_list.scrollToEnsureRowIsOnscreen(row);
                 }
                 else
+                {
                     m_list.deselectAllRows();
+                    if(chosen)
+                        m_list.scrollToEnsureRowIsOnscreen(0);
+                }
                 m_selecting = false;
                 m_list.repaint();
             }
         }
 
         int count() const { return static_cast<int>(m_rows.size()); }
-        bool showsBanks() const { return m_allBanks; }
 
         // Only the patches whose name holds this text, in upper or lower case; empty: all.
         void setSearch(const juce::String& text)
@@ -2569,6 +2699,35 @@ namespace retromulator
             }
             else
                 add(p.getSysexFilePath(), p.getMatrixBankName(), p.getProgramNames());
+
+            // the column chosen, up or down; patches that come level keep the order of the banks
+            const auto before = [this](const Row& a, const Row& b)
+            {
+                switch(m_sort)
+                {
+                case presets::Sort::Favourites: return a.favourite && !b.favourite;
+                case presets::Sort::Number:     return numberOf(a.bank, a.slot) < numberOf(b.bank, b.slot);
+                case presets::Sort::Name:       return juce::String(a.name).compareNatural(juce::String(b.name)) < 0;
+                case presets::Sort::Category:
+                {
+                    // no category after all the others
+                    const auto rank = [](const presets::Category c) { return c == presets::Category::None ? presets::CategoryCount : static_cast<int>(c); };
+                    return rank(a.category) < rank(b.category);
+                }
+                case presets::Sort::Bank:       break;
+                }
+                return false;
+            };
+            if(m_sort == presets::Sort::Bank)
+            {
+                // the order the rows were added in
+                if(m_sortDown)
+                    std::reverse(m_rows.begin(), m_rows.end());
+            }
+            else if(m_sortDown)
+                std::stable_sort(m_rows.begin(), m_rows.end(), [&](const Row& a, const Row& b) { return before(b, a); });
+            else
+                std::stable_sort(m_rows.begin(), m_rows.end(), before);
         }
 
         int getNumRows() override { return count(); }
@@ -2680,6 +2839,8 @@ namespace retromulator
         std::string m_path;
         bool m_allBanks = false;
         presets::Filter m_filter;
+        presets::Sort m_sort = presets::Sort::Bank;
+        bool m_sortDown = false;
         juce::String m_search, m_builtSearch;
         int m_count = -1, m_program = -2, m_ticks = 0;
         int64_t m_banksStamp = 0;
@@ -3197,6 +3358,8 @@ namespace retromulator
         }
         x += 20;
         add(std::make_unique<PresetKey>(ctx, PresetKeyKind::Favourites), {x, y, 112, h});
+        // the heads of the columns, which sort the list
+        add(std::make_unique<PresetHeads>(ctx), {kPsLeft, kPsHeadY - 3, kPsWidth, 22});
 
         m_presetList = std::make_unique<PresetList>(ctx, [this]
         {
@@ -3263,15 +3426,7 @@ namespace retromulator
         g.setFont(sans(13.0f, true));
         g.drawText(juce::String(shown) + (shown == 1 ? " patch" : " patches"), kPsLeft + kPsWidth - 150, kPsSearchY, 138, kPsSearchH, juce::Justification::centredRight, false);
 
-        g.setColour(juce::Colour(st.label));
-        g.setFont(sans(13.5f));
-        const auto head = [&](const char* text, const int x, const int w) { g.drawText(text, kPsLeft + x, kPsHeadY - 1, w, 18, juce::Justification::centredLeft, false); };
-        head("Fav", kPsStarX + 2, kPsStarW);
-        head("No.", kPsNumberX, kPsNumberW);
-        head("Name", kPsNameX, kPsNameW);
-        head("Category", kPsCatX, kPsCatW);
-        if(m_presetList->showsBanks())
-            head("Bank", kPsBankX, 200);
+        // the heads of the columns are a control of their own, over this line
         g.setColour(juce::Colour(st.title).withAlpha(0.55f));
         g.fillRect(static_cast<float>(kPsLeft), static_cast<float>(kPsListY) - 2.0f, static_cast<float>(kPsWidth), 1.2f);
 

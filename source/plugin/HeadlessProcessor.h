@@ -522,6 +522,9 @@ namespace retromulator
         // loaded bank or in every bank. Kept with the session.
         presets::Filter m_presetFilter;
         bool m_presetAllBanks = false;
+        // and the order of the page's list
+        presets::Sort m_presetSort = presets::Sort::Bank;
+        bool m_presetSortDown = false;
 
         // Finish of the GPL editor's panel, shared by every instance.
         static bool isWhitePanel();

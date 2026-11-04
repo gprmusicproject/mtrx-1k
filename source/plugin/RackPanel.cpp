@@ -565,7 +565,7 @@ namespace retromulator
 
     AboutPanel::AboutPanel(const juce::String& name, const juce::String& version)
         : m_name(name), m_version(version),
-          m_link("github.com/reales/retromulator", juce::URL("https://github.com/reales/retromulator"))
+          m_link("github.com/gprmusicproject/mtrx-1k", juce::URL("https://github.com/gprmusicproject/mtrx-1k"))
     {
         m_link.setFont(sansFont(13.0f, false), false, juce::Justification::centredLeft);
         m_link.setColour(juce::HyperlinkButton::textColourId, juce::Colour(rackPanel::kLabelBlue));
@@ -576,7 +576,7 @@ namespace retromulator
 
     void AboutPanel::resized()
     {
-        m_link.setBounds(446, 62, 240, 18);
+        m_link.setBounds(446, 62, 300, 18);
     }
 
     void AboutPanel::paint(juce::Graphics& g)
