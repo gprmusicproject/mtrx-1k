@@ -1245,13 +1245,20 @@ namespace retromulator
     void BasicEditor::openManual()
     {
         const juce::String name("MTRX-1K User Manual.pdf");
-        const juce::String folder("GPR Music Project\\MTRX-1K");
 
         juce::Array<juce::File> places;
+       #if JUCE_MAC
+        // next to the app or plugin bundle (the binary is deep inside it), the folder in
+        // Applications, the data folder
+        places.add(juce::File::getSpecialLocation(juce::File::currentApplicationFile).getSiblingFile(name));
+        places.addIfNotAlreadyThere(juce::File("/Applications/MTRX-1K").getChildFile(name));
+       #else
+        const juce::String folder("GPR Music Project\\MTRX-1K");
         places.add(juce::File::getSpecialLocation(juce::File::currentExecutableFile).getSiblingFile(name));
         for(const char* variable : {"ProgramW6432", "ProgramFiles"})
             if(const char* programs = std::getenv(variable); programs && *programs)
                 places.addIfNotAlreadyThere(juce::File(juce::String(programs)).getChildFile(folder).getChildFile(name));
+       #endif
         places.add(juce::File(juce::String(HeadlessProcessor::getDataFolder())).getChildFile(name));
 
         for(const auto& file : places)

@@ -656,6 +656,13 @@ namespace pluginLib
 
 	std::string Controller::loadParameterDescriptions(const std::string& _filename) const
 	{
+		// No file asked for (MinimalController): without this the folder of the binary itself
+		// is opened, which fails at once on Windows but on macOS, with the app in Documents or
+		// Desktop, raises the privacy prompt for that folder and blocks the start until it is
+		// answered.
+		if(_filename.empty())
+			return {};
+
 	    const auto path = synthLib::getModulePath() + _filename;
 
 	    const std::ifstream f(path.c_str(), std::ios::in);

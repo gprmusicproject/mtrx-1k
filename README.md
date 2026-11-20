@@ -43,7 +43,7 @@ Where the original moves a pitch or a control voltage in audible steps, about 75
 
 ## Status
 
-Version 1.0.0, November 2026. Built and tested on Windows 11 as a VST3 in Cubase 15 and as a standalone app. The build files for other systems come from Retromulator and have not been tried with this version.
+Version 1.0.0, November 2026. Built and tested on Windows 11 as a VST3 in Cubase 15 and as a standalone app. On macOS (Apple Silicon) the VST3, the Audio Unit and the standalone app build with `build_mac.sh`; the Audio Unit passes Apple's validation (`auval`), and the instrument still has to be tried in a host with the firmware. The build files for Linux come from Retromulator and have not been tried with this version.
 
 ## Firmware
 
@@ -66,6 +66,23 @@ build_win.bat
 
 JUCE 8.0.15 comes as a submodule in `Modules/JUCE`. The plugin and the app are written to `build\win-release\Retromulator_artefacts\Release`, as `VST3\MTRX-1K.vst3` and `Standalone\MTRX-1K.exe`. To install the plugin, copy the `MTRX-1K.vst3` folder to `C:\Program Files\Common Files\VST3` while the host is closed.
 
+## Building on macOS
+
+For a Mac with Apple Silicon and macOS 11 or later. You need the Command Line Tools of Xcode (`xcode-select --install`), and CMake and Ninja, from [Homebrew](https://brew.sh):
+
+```
+brew install cmake ninja
+git clone --recurse-submodules https://github.com/gprmusicproject/mtrx-1k
+cd mtrx-1k
+./build_mac.sh
+```
+
+The plugins and the app are written to `build/mac-release/Retromulator_artefacts/Release`, as `VST3/MTRX-1K.vst3`, `AU/MTRX-1K.component` and `Standalone/MTRX-1K.app`, with an ad-hoc signature that lets them run on the Mac they were built on. `./build_mac.sh install` also copies the two plugins to `~/Library/Audio/Plug-Ins/VST3` and `~/Library/Audio/Plug-Ins/Components`. `MTRX_ARCHS="arm64;x86_64" ./build_mac.sh` builds universal binaries that run on Intel Macs too. To give the plugins to others they must be signed with a Developer ID of Apple and notarised.
+
+On macOS the data folder is `~/Library/Application Support/GPR Music Project/MTRX-1K`: the firmware goes in its `ROM` folder, and `Patch` and `MIDI` are kept next to it, as in `Documents` on Windows. The user manual is looked for next to the app, in `/Applications/MTRX-1K` and in the data folder.
+
+MTRX-1K also looks for the firmware next to its own binary. While the app is in Documents, Desktop or Downloads, as a build in a checkout there is, macOS asks once whether MTRX-1K may read that folder.
+
 ## The setup program
 
 `installer\mtrx-1k.iss` is the script of a setup program for Windows, made with [Inno Setup](https://jrsoftware.org/isinfo.php) 6:
@@ -80,7 +97,7 @@ It takes the built app and plugin from `build\win-release` and the user manual, 
 
 This is a modified version of Retromulator 1.8.0 (commit `c20db50` of github.com/reales/retromulator), changed by GPR Music Project in October 2026. The history of this repository shows every change. In short:
 
-- **Build**: a CMake project for Windows (`CMakeLists.txt`, `cmake/`, `build_win.bat`) next to the Projucer project of Retromulator.
+- **Build**: a CMake project for Windows (`CMakeLists.txt`, `cmake/`, `build_win.bat`) next to the Projucer project of Retromulator, and `build_mac.sh` for macOS on Apple Silicon (November 2026): the extra instruments of 12 and 24 voices render on real-time threads of macOS, the user manual is looked for next to the app bundle, and an empty name of parameter descriptions no longer opens the folder of the binary.
 - **Product**: name, vendor and plugin identifiers of MTRX-1K; only the Matrix-1000 core is started. The other cores of Retromulator are still in the source tree and are compiled in.
 - **Interface** (`source/plugin`): the rack panel (`RackPanel`), the patch editor (`EditPanel`), saving and bank handling, the session state of the editor, automatable parameters, program change, and the MIDI learn with its profiles (`MidiLearn`), and the scaling of the whole window.
 - **Effects** (`source/fxLib`): the chain of three racks and its effects, written for MTRX-1K but for the chorus, the spring reverb and the shimmer, which come from the open-source projects listed under [Open-source code in the effects](#open-source-code-in-the-effects). The volume is applied after the effects (`jucePluginLib/processor`).

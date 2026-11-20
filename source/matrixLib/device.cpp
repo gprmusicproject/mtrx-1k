@@ -23,6 +23,13 @@
 #include <windows.h>
 #endif
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
+#include <pthread.h>
+#endif
+
 #if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
 #include <xmmintrin.h>
 #define MATRIXLIB_FP_X86 1
@@ -814,6 +821,26 @@ namespace matrixLib
 			}
 			if(!fast.empty())
 				SetThreadSelectedCpuSets(GetCurrentThread(), fast.data(), static_cast<ULONG>(fast.size()));
+		}
+#elif defined(__APPLE__)
+		// A real-time thread to macOS, as the host's audio thread is: the time constraint
+		// policy schedules it ahead of others and, on Apple Silicon, on the performance cores.
+		// No period: it runs when the audio thread hands it a block. About 5 ms of work in
+		// a window of 10 ms, as an instrument takes a fraction of a block.
+		{
+			mach_timebase_info_data_t timebase{};
+			mach_timebase_info(&timebase);
+			const auto msToTicks = [&timebase](const double _ms)
+			{
+				return static_cast<uint32_t>(_ms * 1'000'000.0 * timebase.denom / timebase.numer);
+			};
+			thread_time_constraint_policy_data_t policy{};
+			policy.period = 0;
+			policy.computation = msToTicks(5.0);
+			policy.constraint = msToTicks(10.0);
+			policy.preemptible = true;
+			thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY,
+				reinterpret_cast<thread_policy_t>(&policy), THREAD_TIME_CONSTRAINT_POLICY_COUNT);
 		}
 #endif
 		for(;;)
