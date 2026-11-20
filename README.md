@@ -43,7 +43,7 @@ Where the original moves a pitch or a control voltage in audible steps, about 75
 
 ## Status
 
-Version 1.0.0, November 2026. Built and tested on Windows 11 as a VST3 in Cubase 15 and as a standalone app. On macOS (Apple Silicon) the VST3, the Audio Unit and the standalone app build with `build_mac.sh`; the Audio Unit passes Apple's validation (`auval`), and the instrument still has to be tried in a host with the firmware. The build files for Linux come from Retromulator and have not been tried with this version.
+Version 1.0.0, November 2026. Built and tested on Windows 11 as a VST3 in Cubase 15 and as a standalone app. On macOS (Apple Silicon) the VST3, the Audio Unit and the standalone app build with `build_mac.sh`; the Audio Unit passes Apple's validation (`auval`), and the instrument was tried with the firmware as a standalone app and as a VST3 in Cubase AI. The build files for Linux come from Retromulator and have not been tried with this version.
 
 ## Firmware
 

@@ -20,6 +20,8 @@ DerivedData/
 # Local material that is not part of the source: manuals and datasheets, screenshots,
 # build logs, test plans, firmware and calibration
 /*.pdf
+/docs/MTRX-1K_User_Manual*
+/installer/mac/
 /*.log
 /*.xlsx
 /Coffeeshopped.jpg
